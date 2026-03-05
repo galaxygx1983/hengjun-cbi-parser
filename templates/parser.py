@@ -1,17 +1,34 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-SDCI帧解析器核心模块 - 联锁系统与调度集中系统通信日志分析
+恒久CBI帧解析器核心模块 - 联锁系统与调度集中系统通信日志分析
 
-帧格式：
+支持以下帧类型：
+- DC2 (0x12) - 连接请求帧
+- DC3 (0x13) - 连接确认帧
+- ACK (0x06) - 应答/心跳帧
+- NACK (0x15) - 否定应答帧
+- VERROR (0x10) - 版本错误帧
+- SDCI (0x8A) - 站场数据变化帧（增量）
+- SDI (0x85) - 站场完整数据帧（全量）
+- SDIQ (0x6A) - 站场数据请求帧
+- FIR (0x65) - 故障信息报告帧
+- RSR (0xAA) - 系统工作状态报告帧
+- BCC (0x95) - 按钮控制命令帧
+- ACQ (0x75) - 自律控制请求帧
+- ACA (0x7A) - 自律控制同意帧
+- TSQ (0x9A) - 时间同步请求帧
+- TSD (0xA5) - 时间同步数据帧
+
+通用帧格式：
 - 帧头：1字节 (0x7D)
 - 首部长：1字节 (0x04)
 - 版本号：1字节 (0x11)
 - 发送序号：1字节
 - 确认序号：1字节
-- 帧类型：1字节 (0x8A为SDCI帧)
-- 数据长度：2字节 (大端序)
-- 站场表示数据：N字节 (每设备3字节：2字节序号+1字节状态)
+- 帧类型：1字节
+- 数据长度：2字节 (大端序，SDCI/SDI/FIR等有数据载荷的帧)
+- 数据载荷：N字节 (帧类型相关)
 - CRC校验：2字节
 - 帧尾：1字节 (0x7E)
 """
@@ -21,7 +38,7 @@ import os
 import json
 from datetime import datetime
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Any
+from typing import Dict, List, Optional, Any, Tuple
 from collections import defaultdict
 from enum import IntEnum
 
@@ -32,6 +49,88 @@ class DeviceType(IntEnum):
     SWITCH_SECTION = 1  # 道岔区段（纯数字名称）
     SIGNAL = 2  # 信号机（D开头数字结尾）
     TRACK_SECTION = 3  # 无岔区段（其他命名规则）
+
+
+# FIR帧错误码映射表（来自Error.sys）
+ERROR_CODE_MAP = {
+    0x00: "错误办理",
+    0x01: "运行表满",
+    0x02: "区段占用",
+    0x03: "敌对进路",
+    0x04: "不能转岔",
+    0x05: "灯丝断丝",
+    0x06: "道岔锁闭",
+    0x07: "照查不对",
+    0x08: "侵限占用",
+    0x09: "区段锁闭",
+    0x0A: "道口未关",
+    0x0B: "信号未关",
+    0x0C: "区段未锁",
+    0x0D: "口令错误",
+    0x0E: "半自动复原",
+    0x0F: "信号关闭",
+    0x10: "双动道岔占用",
+    0x11: "双动道岔锁闭",
+    0x12: "双动道岔锁闭",
+    0x13: "正在转岔",
+    0x14: "未经同意",
+    0x15: "非法码",
+    0x16: "未办半自动",
+    0x17: "接近区段占用",
+    0x18: "条件不满足",
+    0x19: "对方信号不对",
+    0x1A: "跳表示",
+    0x1B: "已办引导总锁",
+    0x1C: "正在办理进路",
+    0x1D: "非法版权",
+    0x1E: "初始化失败",
+    0x1F: "初始化成功",
+    0x20: "岔位不对",
+    0x21: "不能开放",
+    0x22: "冒进信号",
+    0x23: "轨道故障",
+    0x24: "远程中断",
+    0x25: "远程恢复",
+    0x26: "禁止操作",
+    0x27: "禁止切换",
+    0x28: "初始化联系口",
+    0x29: "通讯中断",
+    0x2A: "通讯恢复",
+}
+
+
+# BCC帧命令类型映射表
+BCC_COMMAND_MAP = {
+    3: "人工解锁",
+    4: "取消进路",
+    5: "重复开放",
+    6: "故障解锁",
+    7: "道岔定位",
+    8: "道岔反位",
+    9: "道岔锁闭",
+    10: "道岔解锁",
+    12: "调车作业",
+    13: "关闭信号",
+    14: "列车作业",
+    15: "引导总解锁",
+    16: "引导锁闭",
+    18: "引导总锁",
+}
+
+
+# RSR帧状态值映射表
+RSR_STATUS_MAP = {
+    0x55: {"role": "主机", "mode_ctc": "同意自律", "mode_ilock": "自律控制"},
+    0xAA: {"role": "备机", "mode_ctc": "不同意自律", "mode_ilock": "非常站控"},
+    0xCC: {"role": "未知", "mode_ctc": "不确定", "mode_ilock": "中间状态"},
+}
+
+
+# ACA帧同意标志映射表
+ACA_RESPONSE_MAP = {
+    0x55: "同意",
+    0xAA: "不同意",
+}
 
 
 @dataclass
@@ -72,21 +171,109 @@ class DeviceState:
 
 
 @dataclass
-class SDCIFrame:
-    """SDCI帧结构"""
+class Frame:
+    """通用帧结构"""
 
     timestamp: str
+    frame_type: int  # 帧类型代码
+    frame_type_name: str  # 帧类型名称
     send_seq: int  # 发送序号
     ack_seq: int  # 确认序号
     data_length: int  # 数据长度
-    raw_data: bytes  # 原始数据（包含帧头到帧尾）
-    payload: bytes  # 站场表示数据
+    raw_data: bytes  # 原始数据
+    payload: bytes  # 数据载荷
     crc: int  # CRC校验值
-    device_states: List[DeviceState] = field(default_factory=list)
+    direction: str  # 传输方向
+    device_states: List[DeviceState] = field(default_factory=list)  # 设备状态列表（仅SDCI/SDI帧）
+    fir_events: List[Dict[str, Any]] = field(default_factory=list)  # 故障事件列表（仅FIR帧）
+    rsr_status: Optional[Dict[str, Any]] = None  # RSR状态信息
+    bcc_command: Optional[Dict[str, Any]] = None  # BCC命令信息
+    tsd_time: Optional[Dict[str, Any]] = None  # TSD时间信息
+    aca_response: Optional[Dict[str, Any]] = None  # ACA响应信息
+
+    def get_frame_name(self) -> str:
+        """获取帧类型名称"""
+        return self.frame_type_name
+
+    def has_device_states(self) -> bool:
+        """是否有设备状态（SDCI/SDI帧）"""
+        return len(self.device_states) > 0
 
     def get_device_count(self) -> int:
         """获取变化的设备数量"""
         return len(self.device_states)
+
+    def has_payload(self) -> bool:
+        """是否有数据载荷"""
+        return FrameType.has_payload(self.frame_type)
+
+
+# 保留向后兼容：SDCIFrame 作为 Frame 的别名
+SDCIFrame = Frame
+
+
+class FrameType(IntEnum):
+    """帧类型枚举"""
+
+    # 控制帧（无数据载荷）
+    DC2 = 0x12  # 连接请求帧
+    DC3 = 0x13  # 连接确认帧
+    ACK = 0x06  # 应答/心跳帧
+    NACK = 0x15  # 否定应答帧
+    VERROR = 0x10  # 版本错误帧
+
+    # 数据帧（有数据载荷）
+    SDCI = 0x8A  # 站场数据变化帧（增量）
+    SDI = 0x85  # 站场完整数据帧（全量）
+    SDIQ = 0x6A  # 站场数据请求帧
+    FIR = 0x65  # 故障信息报告帧
+    RSR = 0xAA  # 系统工作状态报告帧
+    BCC = 0x95  # 按钮控制命令帧
+    ACQ = 0x75  # 自律控制请求帧
+    ACA = 0x7A  # 自律控制同意帧
+    TSQ = 0x9A  # 时间同步请求帧
+    TSD = 0xA5  # 时间同步数据帧
+
+    @classmethod
+    def get_name(cls, code: int) -> str:
+        """获取帧类型名称"""
+        try:
+            return cls(code).name
+        except ValueError:
+            return f"UNKNOWN_0x{code:02X}"
+
+    @classmethod
+    def has_payload(cls, code: int) -> bool:
+        """判断帧类型是否有数据载荷"""
+        no_payload = {cls.DC2, cls.DC3, cls.ACK, cls.NACK, cls.VERROR, cls.SDIQ, cls.TSQ, cls.ACQ}
+        return code not in no_payload
+
+
+class FrameTypeInfo:
+    """帧类型信息映射"""
+
+    FRAME_INFO = {
+        0x12: {"name": "DC2", "direction": "CTC→联锁", "has_payload": False, "desc": "连接建立请求帧"},
+        0x13: {"name": "DC3", "direction": "联锁→CTC", "has_payload": False, "desc": "连接确认帧"},
+        0x06: {"name": "ACK", "direction": "双向", "has_payload": False, "desc": "应答/心跳帧"},
+        0x15: {"name": "NACK", "direction": "双向", "has_payload": False, "desc": "否定应答帧"},
+        0x10: {"name": "VERROR", "direction": "双向", "has_payload": False, "desc": "版本错误帧"},
+        0x8A: {"name": "SDCI", "direction": "联锁→CTC", "has_payload": True, "desc": "站场数据变化（增量）"},
+        0x85: {"name": "SDI", "direction": "联锁→CTC", "has_payload": True, "desc": "站场完整数据（全量）"},
+        0x6A: {"name": "SDIQ", "direction": "CTC→联锁", "has_payload": False, "desc": "站场数据请求帧"},
+        0x65: {"name": "FIR", "direction": "联锁→CTC", "has_payload": True, "desc": "故障信息报告帧"},
+        0xAA: {"name": "RSR", "direction": "双向", "has_payload": True, "desc": "系统工作状态报告帧"},
+        0x95: {"name": "BCC", "direction": "CTC→联锁", "has_payload": True, "desc": "按钮控制命令帧"},
+        0x75: {"name": "ACQ", "direction": "联锁→CTC", "has_payload": False, "desc": "自律控制请求帧"},
+        0x7A: {"name": "ACA", "direction": "CTC→联锁", "has_payload": True, "desc": "自律控制同意帧"},
+        0x9A: {"name": "TSQ", "direction": "联锁→CTC", "has_payload": False, "desc": "时间同步请求帧"},
+        0xA5: {"name": "TSD", "direction": "CTC→联锁", "has_payload": True, "desc": "时间同步数据帧"},
+    }
+
+    @classmethod
+    def get_info(cls, frame_type: int) -> Dict[str, Any]:
+        """获取帧类型信息"""
+        return cls.FRAME_INFO.get(frame_type, {"name": f"UNKNOWN_0x{frame_type:02X}", "direction": "未知", "has_payload": False, "desc": "未知帧类型"})
 
 
 class CodePositionTable:
@@ -363,32 +550,57 @@ class StateDecoder:
         return result
 
 
-class SDCIFrameParser:
-    """SDCI帧解析器"""
+# 保留向后兼容：SDCIFrameParser 作为 FrameParser 的别名
+class FrameParser:
+    """通用帧解析器 - 支持所有帧类型
+
+    支持的帧类型：
+    - 无数据载荷帧：DC2(0x12), DC3(0x13), ACK(0x06), NACK(0x15), VERROR(0x10), SDIQ(0x6A), TSQ(0x9A), ACQ(0x75)
+    - 有数据载荷帧：SDCI(0x8A), SDI(0x85), FIR(0x65), RSR(0xAA), BCC(0x95), ACA(0x7A), TSD(0xA5)
+    """
 
     # 帧常量
     FRAME_HEADER = 0x7D
     FRAME_TAIL = 0x7E
     HEADER_LENGTH = 0x04
     VERSION = 0x11
-    FRAME_TYPE_SDCI = 0x8A  # SDCI帧（变化设备列表）
-    FRAME_TYPE_SDI = 0x85  # SDI帧（完整站场状态）
-    FRAME_TYPE_CONTROL = 0x06
 
-    def __init__(self, code_position_table: CodePositionTable):
+    # 支持的帧类型
+    FRAME_TYPES = {
+        0x12,  # DC2
+        0x13,  # DC3
+        0x06,  # ACK
+        0x15,  # NACK
+        0x10,  # VERROR
+        0x8A,  # SDCI
+        0x85,  # SDI
+        0x6A,  # SDIQ
+        0x65,  # FIR
+        0xAA,  # RSR
+        0x95,  # BCC
+        0x75,  # ACQ
+        0x7A,  # ACA
+        0x9A,  # TSQ
+        0xA5,  # TSD
+    }
+
+    # 有数据载荷的帧类型
+    FRAMES_WITH_PAYLOAD = {0x8A, 0x85, 0x65, 0xAA, 0x95, 0x7A, 0xA5}
+
+    def __init__(self, code_position_table: Optional[CodePositionTable] = None):
         self.cpt = code_position_table
 
     def parse_frame(
         self, raw_data: bytes, timestamp: Optional[str] = None
-    ) -> Optional[SDCIFrame]:
-        """解析SDCI帧
+    ) -> Optional[Frame]:
+        """解析任意帧类型
 
         Args:
             raw_data: 帧的原始字节数据
             timestamp: 可选的时间戳字符串
 
         Returns:
-            解析成功的SDCIFrame对象，失败返回None
+            解析成功的Frame对象，失败返回None
         """
         if len(raw_data) < 9:
             return None
@@ -403,43 +615,75 @@ class SDCIFrameParser:
 
         # 检查帧类型
         frame_type = raw_data[5]
-        is_sdi = frame_type == self.FRAME_TYPE_SDI
-        is_sdci = frame_type == self.FRAME_TYPE_SDCI
-        if not (is_sdi or is_sdci):
+        if frame_type not in self.FRAME_TYPES:
             return None  # 不支持的帧类型
 
         # 解析序号
         send_seq = raw_data[3]
         ack_seq = raw_data[4]
 
-        # 解析数据长度（大端序）
-        data_length = (raw_data[6] << 8) | raw_data[7]
+        # 获取帧类型信息
+        frame_type_info = FrameTypeInfo.get_info(frame_type)
+        frame_type_name = frame_type_info["name"]
+        direction = frame_type_info["direction"]
+
+        # 解析数据长度（无数据载荷帧为0）
+        data_length = 0
+        if frame_type in self.FRAMES_WITH_PAYLOAD:
+            if len(raw_data) < 12:
+                return None
+            data_length = (raw_data[6] << 8) | raw_data[7]
 
         # 提取CRC（最后3字节：2字节CRC + 1字节帧尾）
         crc = (raw_data[-3] << 8) | raw_data[-2]
 
-        # 提取数据载荷（跳过8字节首部，到CRC之前）
-        payload_start = 8
-        payload_end = len(raw_data) - 3
-        payload = raw_data[payload_start:payload_end]
+        # 提取数据载荷
+        payload = b""
+        if frame_type in self.FRAMES_WITH_PAYLOAD:
+            payload_start = 8
+            payload_end = len(raw_data) - 3
+            payload = raw_data[payload_start:payload_end]
 
         # 根据帧类型解析数据载荷
-        if is_sdi:
-            # SDI帧：完整站场状态字节数组
-            device_states = self._parse_sdi_payload(payload)
-        else:
-            # SDCI帧：变化设备列表（每3字节一个设备）
-            device_states = self._parse_sdci_payload(payload)
+        device_states = []
+        fir_events = []
+        rsr_status = None
+        bcc_command = None
+        tsd_time = None
+        aca_response = None
 
-        return SDCIFrame(
+        if frame_type == 0x8A:  # SDCI - 站场数据变化
+            device_states = self._parse_sdci_payload(payload)
+        elif frame_type == 0x85:  # SDI - 站场完整数据
+            device_states = self._parse_sdi_payload(payload)
+        elif frame_type == 0x65:  # FIR - 故障信息报告
+            fir_events = self._parse_fir_payload(payload)
+        elif frame_type == 0xAA:  # RSR - 系统工作状态报告
+            rsr_status = self._parse_rsr_payload(payload)
+        elif frame_type == 0x95:  # BCC - 按钮控制命令
+            bcc_command = self._parse_bcc_payload(payload)
+        elif frame_type == 0xA5:  # TSD - 时间同步数据
+            tsd_time = self._parse_tsd_payload(payload)
+        elif frame_type == 0x7A:  # ACA - 自律控制同意
+            aca_response = self._parse_aca_payload(payload)
+
+        return Frame(
             timestamp=timestamp or "",
+            frame_type=frame_type,
+            frame_type_name=frame_type_name,
             send_seq=send_seq,
             ack_seq=ack_seq,
             data_length=data_length,
             raw_data=raw_data,
             payload=payload,
             crc=crc,
+            direction=direction,
             device_states=device_states,
+            fir_events=fir_events,
+            rsr_status=rsr_status,
+            bcc_command=bcc_command,
+            tsd_time=tsd_time,
+            aca_response=aca_response,
         )
 
     def _parse_sdci_payload(self, payload: bytes) -> List[DeviceState]:
@@ -450,6 +694,9 @@ class SDCIFrameParser:
         - 第3字节：设备状态（无岔区段使用bit_offset判断高/低4位）
         """
         device_states = []
+
+        if not self.cpt:
+            return device_states
 
         for i in range(0, len(payload), 3):
             if i + 2 >= len(payload):
@@ -510,6 +757,9 @@ class SDCIFrameParser:
         """
         device_states = []
 
+        if not self.cpt:
+            return device_states
+
         # 遍历所有已知的设备（从zlobjects表）
         for byte_index, device in self.cpt.devices.items():
             # 检查字节索引是否在payload范围内
@@ -538,26 +788,225 @@ class SDCIFrameParser:
 
         return device_states
 
+    def _parse_fir_payload(self, payload: bytes) -> List[Dict[str, Any]]:
+        """解析FIR帧数据载荷（故障信息报告）
+
+        FIR帧每4字节表示一个故障事件：
+        - 字节0：提示码（固定为0）
+        - 字节1-2：对象索引（16位有符号，小端序）
+        - 字节3：故障类型（来自Error.sys的错误码）
+
+        Args:
+            payload: FIR帧数据载荷
+
+        Returns:
+            故障事件列表
+        """
+        fir_events = []
+
+        for i in range(0, len(payload), 4):
+            if i + 3 >= len(payload):
+                break
+
+            # 解析故障信息
+            hint_code = payload[i]
+            # 对象索引（小端序，16位有符号）
+            object_index = (payload[i + 2] << 8) | payload[i + 1]
+            # 转换为有符号数
+            if object_index >= 0x8000:
+                object_index = object_index - 0x10000
+            fault_type_code = payload[i + 3]
+
+            # 查找错误描述
+            fault_description = ERROR_CODE_MAP.get(fault_type_code, f"未知错误(0x{fault_type_code:02X})")
+
+            fir_event = {
+                "hint_code": hint_code,
+                "object_index": object_index,
+                "fault_type_code": fault_type_code,
+                "fault_description": fault_description,
+            }
+            fir_events.append(fir_event)
+
+        return fir_events
+
+    def _parse_rsr_payload(self, payload: bytes) -> Optional[Dict[str, Any]]:
+        """解析RSR帧数据载荷（工作状态报告）
+
+        RSR帧包含2字节状态信息：
+        - 字节0：主备状态
+        - 字节1：控制模式
+
+        Args:
+            payload: RSR帧数据载荷（应为2字节）
+
+        Returns:
+            状态信息字典
+        """
+        if len(payload) < 2:
+            return None
+
+        role_status = payload[0]
+        control_mode = payload[1]
+
+        # 查找状态映射
+        status_info = RSR_STATUS_MAP.get(role_status, {"role": "未知", "mode_ctc": "未知", "mode_ilock": "未知"})
+
+        # 根据方向判断控制模式含义（这里简化为返回所有可能）
+        rsr_status = {
+            "role_status": role_status,
+            "role": status_info["role"],
+            "control_mode": control_mode,
+            "mode_ctc": status_info["mode_ctc"],
+            "mode_ilock": status_info["mode_ilock"],
+        }
+
+        return rsr_status
+
+    def _parse_bcc_payload(self, payload: bytes) -> Optional[Dict[str, Any]]:
+        """解析BCC帧数据载荷（按钮控制命令）
+
+        BCC帧包含7字节命令数据：
+        - 字节0：命令类型
+        - 字节1-2：按钮索引1（小端序）
+        - 字节3-4：按钮索引2（小端序，未使用则为-1）
+        - 字节5-6：按钮索引3（小端序，未使用则为-1）
+
+        Args:
+            payload: BCC帧数据载荷（通常为7字节）
+
+        Returns:
+            命令信息字典
+        """
+        if len(payload) < 7:
+            return None
+
+        command_type = payload[0]
+        button_index1 = (payload[2] << 8) | payload[1]
+        button_index2 = (payload[4] << 8) | payload[3]
+        button_index3 = (payload[6] << 8) | payload[5]
+
+        # 处理未使用的索引（0xFFFF = -1）
+        if button_index1 == 0xFFFF:
+            button_index1 = -1
+        if button_index2 == 0xFFFF:
+            button_index2 = -1
+        if button_index3 == 0xFFFF:
+            button_index3 = -1
+
+        # 查找命令描述
+        command_description = BCC_COMMAND_MAP.get(command_type, f"未知命令({command_type})")
+
+        bcc_command = {
+            "command_type": command_type,
+            "command_description": command_description,
+            "button_index1": button_index1,
+            "button_index2": button_index2,
+            "button_index3": button_index3,
+        }
+
+        return bcc_command
+
+    def _parse_tsd_payload(self, payload: bytes) -> Optional[Dict[str, Any]]:
+        """解析TSD帧数据载荷（时间同步数据）
+
+        TSD帧包含7字节时间数据：
+        - 字节0-1：年份（小端序）
+        - 字节2：月份
+        - 字节3：日期
+        - 字节4：小时
+        - 字节5：分钟
+        - 字节6：秒
+
+        Args:
+            payload: TSD帧数据载荷（应为7字节）
+
+        Returns:
+            时间信息字典
+        """
+        if len(payload) < 7:
+            return None
+
+        # 解析时间数据（小端序年份）
+        year = (payload[1] << 8) | payload[0]
+        month = payload[2]
+        day = payload[3]
+        hour = payload[4]
+        minute = payload[5]
+        second = payload[6]
+
+        # 格式化为时间字符串
+        try:
+            time_str = f"{year:04d}-{month:02d}-{day:02d} {hour:02d}:{minute:02d}:{second:02d}"
+        except:
+            time_str = "无效时间"
+
+        tsd_time = {
+            "year": year,
+            "month": month,
+            "day": day,
+            "hour": hour,
+            "minute": minute,
+            "second": second,
+            "time_string": time_str,
+        }
+
+        return tsd_time
+
+    def _parse_aca_payload(self, payload: bytes) -> Optional[Dict[str, Any]]:
+        """解析ACA帧数据载荷（自律控制同意）
+
+        ACA帧包含1字节同意标志：
+        - 字节0：同意标志（0x55=同意，0xAA=不同意）
+
+        Args:
+            payload: ACA帧数据载荷（应为1字节）
+
+        Returns:
+            同意响应信息字典
+        """
+        if len(payload) < 1:
+            return None
+
+        response_flag = payload[0]
+        response_description = ACA_RESPONSE_MAP.get(response_flag, f"未知({response_flag})")
+
+        aca_response = {
+            "response_flag": response_flag,
+            "response_description": response_description,
+        }
+
+        return aca_response
+
+
+# 保留向后兼容：SDCIFrameParser 作为 FrameParser 的别名
+SDCIFrameParser = FrameParser
+
 
 class CTCLogAnalyzer:
-    """CTC日志分析器"""
+    """CTC日志分析器 - 支持所有帧类型"""
 
-    def __init__(self, log_file: str, code_position_table: CodePositionTable):
+    def __init__(self, log_file: str, code_position_table: Optional[CodePositionTable] = None):
         self.log_file = log_file
         self.cpt = code_position_table
-        self.parser = SDCIFrameParser(code_position_table)
-        self.frames: List[SDCIFrame] = []
+        self.parser = FrameParser(code_position_table)
+        self.frames: List[Frame] = []
 
-    def analyze(self, max_frames: Optional[int] = None) -> List[SDCIFrame]:
-        """分析日志文件，提取SDCI帧
+    def analyze(self, max_frames: Optional[int] = None, frame_types: Optional[set] = None) -> List[Frame]:
+        """分析日志文件，提取所有类型的帧
 
         Args:
             max_frames: 最大解析帧数（None表示不限制）
+            frame_types: 要解析的帧类型集合（None表示所有类型）
 
         Returns:
-            解析出的SDCIFrame列表
+            解析出的Frame列表
         """
-        # 正则表达式匹配包含SDCI数据的行
+        # 默认解析所有支持的帧类型
+        if frame_types is None:
+            frame_types = FrameParser.FRAME_TYPES
+
+        # 正则表达式匹配包含帧数据的行
         # 匹配模式: "Data: 7D 04 11 65 BF 8A 03 00 00 B7 10 28 81 7E"
         data_pattern = re.compile(
             r"(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}\.\d+).*?Data:\s+([0-9A-Fa-f\s]+)"
@@ -575,20 +1024,77 @@ class CTCLogAnalyzer:
                     try:
                         raw_bytes = bytes.fromhex(hex_data.replace(" ", ""))
 
-                        # 检查是否是SDCI帧（帧类型0x8A）
-                        if len(raw_bytes) >= 6 and raw_bytes[5] == 0x8A:
-                            frame = self.parser.parse_frame(raw_bytes, timestamp)
-                            if frame:
-                                self.frames.append(frame)
-                                frame_count += 1
+                        # 检查帧类型是否在目标类型中
+                        if len(raw_bytes) >= 6:
+                            frame_type = raw_bytes[5]
+                            if frame_type in frame_types:
+                                frame = self.parser.parse_frame(raw_bytes, timestamp)
+                                if frame:
+                                    self.frames.append(frame)
+                                    frame_count += 1
 
-                                if max_frames and frame_count >= max_frames:
-                                    break
+                                    if max_frames and frame_count >= max_frames:
+                                        break
 
                     except ValueError:
                         continue
 
         return self.frames
+
+    def analyze_sdci(self, max_frames: Optional[int] = None) -> List[Frame]:
+        """分析日志文件，只提取SDCI帧（向后兼容）
+
+        Args:
+            max_frames: 最大解析帧数
+
+        Returns:
+            解析出的SDCI帧列表
+        """
+        return self.analyze(max_frames=max_frames, frame_types={0x8A})
+
+    def analyze_sdi(self, max_frames: Optional[int] = None) -> List[Frame]:
+        """分析日志文件，只提取SDI帧
+
+        Args:
+            max_frames: 最大解析帧数
+
+        Returns:
+            解析出的SDI帧列表
+        """
+        return self.analyze(max_frames=max_frames, frame_types={0x85})
+
+    def analyze_fir(self, max_frames: Optional[int] = None) -> List[Frame]:
+        """分析日志文件，只提取FIR帧
+
+        Args:
+            max_frames: 最大解析帧数
+
+        Returns:
+            解析出的FIR帧列表
+        """
+        return self.analyze(max_frames=max_frames, frame_types={0x65})
+
+    def analyze_control_frames(self, max_frames: Optional[int] = None) -> List[Frame]:
+        """分析日志文件，只提取控制帧（DC2/DC3/ACK/NACK/VERROR）
+
+        Args:
+            max_frames: 最大解析帧数
+
+        Returns:
+            解析出的控制帧列表
+        """
+        return self.analyze(max_frames=max_frames, frame_types={0x12, 0x13, 0x06, 0x15, 0x10})
+
+    def get_frame_statistics(self) -> Dict[str, Any]:
+        """获取帧统计信息
+
+        Returns:
+            统计信息字典
+        """
+        stats = defaultdict(int)
+        for frame in self.frames:
+            stats[frame.frame_type_name] += 1
+        return dict(stats)
 
     def generate_report(
         self, output_file: Optional[str] = None, max_frames_in_report: int = 100
@@ -605,52 +1111,45 @@ class CTCLogAnalyzer:
         lines = []
 
         lines.append("=" * 80)
-        lines.append("SDCI帧分析报告")
+        lines.append("CTC帧分析报告")
         lines.append("=" * 80)
         lines.append(f"分析时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
         lines.append(f"日志文件: {self.log_file}")
-        lines.append(f"码位表文件: {self.cpt.file_path}")
-        lines.append(f"总SDCI帧数: {len(self.frames)}")
+        lines.append(f"码位表文件: {self.cpt.file_path if self.cpt else 'N/A'}")
+        lines.append(f"总帧数: {len(self.frames)}")
         lines.append("")
 
         # 统计信息
         lines.append("-" * 80)
-        lines.append("统计信息")
+        lines.append("帧类型统计")
         lines.append("-" * 80)
 
-        device_type_counts = defaultdict(int)
-        total_device_changes = 0
-
-        for frame in self.frames:
-            total_device_changes += frame.get_device_count()
-            for ds in frame.device_states:
-                device_type_counts[ds.device.get_type_description()] += 1
-
-        lines.append(f"设备状态变化总次数: {total_device_changes}")
-        lines.append("")
-        lines.append("按设备类型统计:")
-        for dtype, count in sorted(device_type_counts.items()):
-            lines.append(f"  {dtype}: {count}次")
+        stats = self.get_frame_statistics()
+        for frame_type, count in sorted(stats.items()):
+            lines.append(f"  {frame_type}: {count}帧")
         lines.append("")
 
         # 详细帧信息
         lines.append("-" * 80)
-        lines.append(f"SDCI帧详细信息 (显示前{max_frames_in_report}帧)")
+        lines.append(f"帧详细信息 (显示前{max_frames_in_report}帧)")
         lines.append("-" * 80)
 
         for i, frame in enumerate(self.frames[:max_frames_in_report], 1):
             lines.append(f"\n帧 #{i}")
+            lines.append(f"  帧类型: {frame.frame_type_name} (0x{frame.frame_type:02X})")
+            lines.append(f"  方向: {frame.direction}")
             lines.append(f"  时间戳: {frame.timestamp}")
             lines.append(f"  发送序号: 0x{frame.send_seq:02X} ({frame.send_seq})")
             lines.append(f"  确认序号: 0x{frame.ack_seq:02X} ({frame.ack_seq})")
             lines.append(f"  数据长度: {frame.data_length}字节")
             lines.append(f"  CRC校验: 0x{frame.crc:04X}")
-            lines.append(f"  变化设备数: {frame.get_device_count()}")
             lines.append(f"  原始数据: {frame.raw_data.hex().upper()}")
 
+            # 帧类型特定信息
             if frame.device_states:
+                lines.append(f"  设备状态变化数: {frame.get_device_count()}")
                 lines.append("  设备状态详情:")
-                for ds in frame.device_states:
+                for ds in frame.device_states[:10]:  # 最多显示10个
                     lines.append(
                         f"    - {ds.device.name} [{ds.device.get_type_description()}]"
                     )
@@ -661,6 +1160,35 @@ class CTCLogAnalyzer:
                     for key, value in ds.decoded_state.items():
                         lines.append(f"      {key}: {value}")
 
+            if frame.fir_events:
+                lines.append("  故障事件:")
+                for event in frame.fir_events:
+                    lines.append(f"    - 对象索引: {event['object_index']}")
+                    lines.append(f"      故障类型: 0x{event['fault_type_code']:02X} - {event['fault_description']}")
+
+            if frame.rsr_status:
+                lines.append("  工作状态:")
+                lines.append(f"    主备状态: {frame.rsr_status['role']} (0x{frame.rsr_status['role_status']:02X})")
+                lines.append(f"    控制模式: {frame.rsr_status['mode_ilock']}")
+
+            if frame.bcc_command:
+                lines.append("  按钮命令:")
+                lines.append(f"    命令类型: {frame.bcc_command['command_description']} (0x{frame.bcc_command['command_type']:02X})")
+                if frame.bcc_command['button_index1'] >= 0:
+                    lines.append(f"    按钮1索引: {frame.bcc_command['button_index1']}")
+                if frame.bcc_command['button_index2'] >= 0:
+                    lines.append(f"    按钮2索引: {frame.bcc_command['button_index2']}")
+                if frame.bcc_command['button_index3'] >= 0:
+                    lines.append(f"    按钮3索引: {frame.bcc_command['button_index3']}")
+
+            if frame.tsd_time:
+                lines.append("  时间数据:")
+                lines.append(f"    时间: {frame.tsd_time['time_string']}")
+
+            if frame.aca_response:
+                lines.append("  自律控制响应:")
+                lines.append(f"    响应: {frame.aca_response['response_description']} (0x{frame.aca_response['response_flag']:02X})")
+
         report = "\n".join(lines)
 
         if output_file:
@@ -670,23 +1198,31 @@ class CTCLogAnalyzer:
         return report
 
 
-def export_to_json(frames: List[SDCIFrame], output_file: str):
+def export_to_json(frames: List[Frame], output_file: str):
     """导出帧数据为JSON格式
 
     Args:
-        frames: SDCIFrame列表
+        frames: Frame列表
         output_file: 输出JSON文件路径
     """
     data = []
     for frame in frames:
         frame_data = {
             "timestamp": frame.timestamp,
+            "frame_type": f"0x{frame.frame_type:02X}",
+            "frame_type_name": frame.frame_type_name,
+            "direction": frame.direction,
             "send_seq": frame.send_seq,
             "ack_seq": frame.ack_seq,
             "data_length": frame.data_length,
             "crc": f"0x{frame.crc:04X}",
             "raw_data": frame.raw_data.hex().upper(),
             "devices": [],
+            "fir_events": frame.fir_events,
+            "rsr_status": frame.rsr_status,
+            "bcc_command": frame.bcc_command,
+            "tsd_time": frame.tsd_time,
+            "aca_response": frame.aca_response,
         }
 
         for ds in frame.device_states:
@@ -1128,14 +1664,14 @@ def parse_sdci_log(log_file: str, code_table: str, output_dir: str = "."):
         output_dir: 输出目录
 
     Returns:
-        解析出的SDCIFrame列表
+        解析出的Frame列表
     """
     # 加载码位表
     cpt = CodePositionTable(code_table)
 
     # 分析日志
     analyzer = CTCLogAnalyzer(log_file, cpt)
-    frames = analyzer.analyze()
+    frames = analyzer.analyze_sdci()
 
     # 生成报告
     report_file = os.path.join(output_dir, "sdci_analysis_report.txt")
@@ -1143,6 +1679,37 @@ def parse_sdci_log(log_file: str, code_table: str, output_dir: str = "."):
 
     # 导出JSON
     json_file = os.path.join(output_dir, "sdci_frames.json")
+    export_to_json(frames, json_file)
+
+    return frames
+
+
+def parse_all_frames(log_file: str, code_table: Optional[str] = None, output_dir: str = "."):
+    """解析所有帧类型日志文件（便捷函数）
+
+    Args:
+        log_file: CTC日志文件路径
+        code_table: 码位表文件路径（可选）
+        output_dir: 输出目录
+
+    Returns:
+        解析出的Frame列表
+    """
+    # 加载码位表（如果提供）
+    cpt = None
+    if code_table:
+        cpt = CodePositionTable(code_table)
+
+    # 分析日志
+    analyzer = CTCLogAnalyzer(log_file, cpt)
+    frames = analyzer.analyze()
+
+    # 生成报告
+    report_file = os.path.join(output_dir, "frame_analysis_report.txt")
+    analyzer.generate_report(output_file=report_file)
+
+    # 导出JSON
+    json_file = os.path.join(output_dir, "all_frames.json")
     export_to_json(frames, json_file)
 
     return frames
@@ -1172,3 +1739,392 @@ def analyze_hardware_faults(log_file: str, output_dir: str = ".") -> Dict[str, A
     analyzer.export_to_csv(csv_file)
 
     return result
+class DeviceTimelineAnalyzer:
+    """设备状态变化时间线分析器
+
+    从日志文件中提取指定设备的状态变化时间线。
+    支持按设备名称查询（如 "D1", "5", "I" 等）。
+    """
+
+    # 日志中帧的标记
+    SDCI_MARKER = b"[SDCI ]"
+    SDI_MARKER = b"[SDI  ]"
+
+    def __init__(self, log_file: str, code_position_table: CodePositionTable):
+        """初始化分析器
+
+        Args:
+            log_file: 日志文件路径
+            code_position_table: 码位表解析器实例
+        """
+        self.log_file = log_file
+        self.cpt = code_position_table
+        self.frame_parser = FrameParser(code_position_table)
+
+    def _extract_timestamp_from_line(self, line: bytes) -> Optional[str]:
+        """从日志行中提取时间戳
+
+        Args:
+            line: 日志行字节数据
+
+        Returns:
+            时间戳字符串，格式 HH:MM:SS
+        """
+        match = re.search(rb"(\d{2}:\d{2}:\d{2})", line)
+        if match:
+            return match.group(1).decode("utf-8", errors="ignore")
+        return None
+
+    def _extract_hex_data_from_line(self, line: bytes) -> Optional[bytes]:
+        """从日志行中提取十六进制帧数据
+
+        Args:
+            line: 日志行字节数据
+
+        Returns:
+            解析后的帧数据字节
+        """
+        # 查找帧标记后的十六进制数据
+        hex_chars = b""
+        for i, byte in enumerate(line):
+            # 跳过标记部分，从数据区域开始提取
+            if 48 <= byte <= 57:  # 0-9
+                hex_chars += bytes([byte])
+            elif 65 <= byte <= 70:  # A-F
+                hex_chars += bytes([byte])
+            elif 97 <= byte <= 102:  # a-f
+                hex_chars += bytes([byte])
+            elif len(hex_chars) > 0 and byte == 32:  # 空格
+                continue
+            else:
+                if len(hex_chars) >= 20:  # 至少需要一帧的数据
+                    break
+                hex_chars = b""
+
+        if len(hex_chars) >= 20:
+            try:
+                return bytes.fromhex(hex_chars.decode("ascii"))
+            except:
+                pass
+        return None
+
+    def _parse_log_frames(self) -> List[Tuple[str, Frame]]:
+        """解析日志文件中的所有帧
+
+        Returns:
+            (时间戳, Frame对象) 列表
+        """
+        frames = []
+
+        with open(self.log_file, "rb") as f:
+            content = f.read()
+
+        # 查找所有SDCI帧
+        pos = 0
+        while True:
+            # 优先查找SDCI帧
+            sdci_pos = content.find(self.SDCI_MARKER, pos)
+            sdi_pos = content.find(self.SDI_MARKER, pos)
+
+            # 取最近的帧
+            if sdci_pos == -1 and sdi_pos == -1:
+                break
+            elif sdci_pos == -1:
+                current_pos = sdi_pos
+            elif sdi_pos == -1:
+                current_pos = sdci_pos
+            else:
+                current_pos = min(sdci_pos, sdi_pos)
+
+            # 提取行
+            line_start = content.rfind(b"\n", 0, current_pos)
+            line_start = line_start + 1 if line_start != -1 else 0
+            line_end = content.find(b"\n", current_pos)
+            line_end = line_end if line_end != -1 else len(content)
+
+            line = content[line_start:line_end]
+
+            # 提取时间戳
+            timestamp = self._extract_timestamp_from_line(line)
+            if not timestamp:
+                pos = current_pos + 1
+                continue
+
+            # 提取十六进制数据
+            hex_data = self._extract_hex_data_from_line(line)
+            if not hex_data or len(hex_data) < 12:
+                pos = current_pos + 1
+                continue
+
+            # 解析帧
+            frame = self.frame_parser.parse_frame(hex_data, timestamp)
+            if frame:
+                frames.append((timestamp, frame))
+
+            pos = current_pos + 1
+
+        return frames
+
+    def analyze_device(self, device_name: str) -> List[Dict[str, Any]]:
+        """分析指定设备的状态变化时间线
+
+        Args:
+            device_name: 设备名称，支持格式如 "D1", "5", "I" 等
+
+        Returns:
+            状态变化列表，每个元素包含:
+            - timestamp: 时间戳
+            - frame_type: 帧类型 (SDCI/SDI)
+            - raw_state: 原始状态值
+            - decoded_state: 解码后的状态字典
+            - device_name: 设备名称
+        """
+        # 查找设备信息
+        device = self.cpt.get_device_by_name(device_name)
+        if not device:
+            # 尝试直接用名称搜索
+            for name, dev in self.cpt.devices_by_name.items():
+                if device_name in name or name in device_name:
+                    device = dev
+                    break
+
+        if not device:
+            return []
+
+        # 解析日志中的所有帧
+        frames = self._parse_log_frames()
+
+        # 提取该设备的状态变化
+        state_changes = []
+        current_state = None
+
+        for timestamp, frame in frames:
+            frame_type = frame.frame_type_name
+
+            # 查找当前帧中该设备的状态
+            device_state = None
+
+            if frame.device_states:
+                for ds in frame.device_states:
+                    if ds.device.object_index == device.object_index:
+                        device_state = ds
+                        break
+
+            if device_state:
+                raw_state = device_state.raw_state
+                decoded_state = device_state.decoded_state
+
+                # 状态变化记录（首次或状态值改变）
+                if current_state is None or current_state != raw_state:
+                    state_changes.append({
+                        "timestamp": timestamp,
+                        "frame_type": frame_type,
+                        "raw_state": raw_state,
+                        "decoded_state": decoded_state,
+                        "device_name": device.name,
+                    })
+                    current_state = raw_state
+
+        return state_changes
+
+    def get_device_states_at_frames(self, device_name: str) -> List[Dict[str, Any]]:
+        """获取设备在每一帧中的状态（不过滤变化）
+
+        Args:
+            device_name: 设备名称
+
+        Returns:
+            状态列表，包含每一帧的状态
+        """
+        # 查找设备信息
+        device = self.cpt.get_device_by_name(device_name)
+        if not device:
+            for name, dev in self.cpt.devices_by_name.items():
+                if device_name in name or name in device_name:
+                    device = dev
+                    break
+
+        if not device:
+            return []
+
+        # 解析日志中的所有帧
+        frames = self._parse_log_frames()
+
+        # 提取该设备的状态
+        states = []
+
+        for timestamp, frame in frames:
+            frame_type = frame.frame_type_name
+
+            if frame.device_states:
+                for ds in frame.device_states:
+                    if ds.device.object_index == device.object_index:
+                        states.append({
+                            "timestamp": timestamp,
+                            "frame_type": frame_type,
+                            "raw_state": ds.raw_state,
+                            "decoded_state": ds.decoded_state,
+                            "device_name": device.name,
+                        })
+                        break
+
+        return states
+
+    def generate_timeline_report(
+        self, device_name: str, output_file: str = None
+    ) -> str:
+        """生成设备时间线报告
+
+        Args:
+            device_name: 设备名称
+            output_file: 输出文件路径（可选）
+
+        Returns:
+            报告文本内容
+        """
+        # 获取状态变化
+        state_changes = self.analyze_device(device_name)
+
+        # 如果没有变化，尝试获取所有状态
+        if not state_changes:
+            state_changes = self.get_device_states_at_frames(device_name)
+
+        # 生成报告
+        lines = []
+        lines.append("=" * 80)
+        lines.append(f"设备状态变化时间线报告")
+        lines.append("=" * 80)
+        lines.append(f"设备名称: {device_name}")
+
+        if not state_changes:
+            lines.append("未找到设备状态记录!")
+            report = "\n".join(lines)
+            if output_file:
+                with open(output_file, "w", encoding="utf-8") as f:
+                    f.write(report)
+            return report
+
+        # 获取设备信息
+        device = self.cpt.get_device_by_name(device_name)
+        if not device:
+            for name, dev in self.cpt.devices_by_name.items():
+                if device_name in name or name in device_name:
+                    device = dev
+                    break
+
+        if device:
+            lines.append(f"设备类型: {device.device_type.name}")
+            lines.append(f"Object Index: {device.object_index}")
+            lines.append(f"Byte Index: {device.byte_index}")
+            lines.append(f"Bit Offset: {device.bit_offset}")
+
+        lines.append(f"记录数量: {len(state_changes)}")
+
+        if len(state_changes) > 1:
+            lines.append(
+                f"时间范围: {state_changes[0]['timestamp']} - {state_changes[-1]['timestamp']}"
+            )
+
+        # 计算状态变化次数
+        change_count = 0
+        if len(state_changes) > 1:
+            for i in range(1, len(state_changes)):
+                if state_changes[i]["raw_state"] != state_changes[i - 1]["raw_state"]:
+                    change_count += 1
+
+        lines.append(f"状态变化次数: {change_count}")
+        lines.append("")
+        lines.append("-" * 80)
+        lines.append("状态变化时间线")
+        lines.append("-" * 80)
+
+        # 打印表头
+        if device and device.device_type == DeviceType.SWITCH_SECTION:
+            lines.append(
+                f"{'序号':<6} {'时间':<12} {'帧类型':<8} {'状态值':<10} {'位置':<14} {'区段锁闭':<10} {'区段占用':<10} {'道岔锁闭':<10}"
+            )
+        elif device and device.device_type == DeviceType.SIGNAL:
+            lines.append(
+                f"{'序号':<6} {'时间':<12} {'帧类型':<8} {'状态值':<10} {'颜色':<20} {'进路转岔':<10} {'延时解锁':<10}"
+            )
+        else:
+            lines.append(
+                f"{'序号':<6} {'时间':<12} {'帧类型':<8} {'状态值':<10} {'状态':<20}"
+            )
+
+        lines.append("-" * 80)
+
+        # 打印每条记录
+        for i, record in enumerate(state_changes, 1):
+            ts = record["timestamp"]
+            frame_type = record["frame_type"]
+            raw_state = f"0x{record['raw_state']:02X}"
+            decoded = record["decoded_state"]
+
+            # 根据设备类型格式化输出
+            if device and device.device_type == DeviceType.SWITCH_SECTION:
+                position = decoded.get("位置", str(decoded))
+                sec_lock = decoded.get("区段锁闭", "")
+                sec_occ = decoded.get("区段占用", "")
+                sw_lock = decoded.get("道岔锁闭", "")
+
+                # 检查是否是状态变化点
+                if i > 1 and record["raw_state"] != state_changes[i - 2]["raw_state"]:
+                    lines.append("[状态变化]")
+                elif i > 1:
+                    lines.append("")
+
+                lines.append(
+                    f"{i:<6} {ts:<12} {frame_type:<8} {raw_state:<10} {position:<14} {sec_lock:<10} {sec_occ:<10} {sw_lock:<10}"
+                )
+
+            elif device and device.device_type == DeviceType.SIGNAL:
+                color = decoded.get("颜色", str(decoded))
+                route = decoded.get("进路转岔", "")
+                delay = decoded.get("延时解锁", "")
+
+                if i > 1 and record["raw_state"] != state_changes[i - 2]["raw_state"]:
+                    lines.append("[状态变化]")
+                elif i > 1:
+                    lines.append("")
+
+                lines.append(
+                    f"{i:<6} {ts:<12} {frame_type:<8} {raw_state:<10} {color:<20} {route:<10} {delay:<10}"
+                )
+
+            else:
+                state_str = str(decoded)
+
+                if i > 1 and record["raw_state"] != state_changes[i - 2]["raw_state"]:
+                    lines.append("[状态变化]")
+                elif i > 1:
+                    lines.append("")
+
+                lines.append(f"{i:<6} {ts:<12} {frame_type:<8} {raw_state:<10} {state_str:<20}")
+
+        lines.append("")
+        lines.append("=" * 80)
+
+        # 统计信息
+        lines.append("统计汇总")
+        lines.append("=" * 80)
+
+        # 状态分布统计
+        state_counts: Dict[str, int] = defaultdict(int)
+        for record in state_changes:
+            state_key = f"0x{record['raw_state']:02X}"
+            state_counts[state_key] += 1
+
+        lines.append("状态分布:")
+        for state, count in sorted(state_counts.items(), key=lambda x: x[1], reverse=True):
+            pct = count / len(state_changes) * 100
+            lines.append(f"  {state}: {count:3d} 次 ({pct:5.1f}%)")
+
+        report = "\n".join(lines)
+
+        # 输出到文件
+        if output_file:
+            with open(output_file, "w", encoding="utf-8") as f:
+                f.write(report)
+
+        return report
