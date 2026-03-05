@@ -1,6 +1,6 @@
 ---
 name: hengjun-cbi-parser
-version: 2.0.0
+version: 2.1.0
 description: 铁路CBI/CTC通信日志分析工具。当用户需要分析铁路联锁系统日志、解析通信帧协议、排查故障时使用此技能。
 trigger:
   - 分析铁路日志
