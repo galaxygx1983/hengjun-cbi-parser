@@ -1,84 +1,151 @@
 ---
 name: hengjun-cbi-parser
-description: Use when analyzing railway CBI and CTC communication logs, parsing frame protocols (SDCI, SDI, SDIQ, DC2, DC3, ACK, NACK, FIR, BCC, TSQ, TSD, RSR, ACQ, ACA, VERROR), decoding interlocking device states, or extracting station yard status changes. MUST read reference documents before analysis.
+description: 铁路CBI/CTC通信日志分析工具。当用户需要分析铁路联锁系统日志、解析通信帧协议、排查故障时使用此技能。
+trigger:
+  - 分析铁路日志
+  - CBI CTC 日志
+  - 联锁 通信
+  - 帧协议解析
+  - SDCI SDI FIR
+  - 设备状态解析
+  - 故障码查询
+  - ZLEvents
+  - lgxtcidriver
 ---
 
 # Hengjun CBI Parser
 
-## 核心功能
+铁路计算机联锁(CBI)与调度集中(CTC)通信日志分析工具
 
-解析铁路CBI（计算机联锁）与CTC（调度集中）通信日志，支持SDCI/SDI/FIR等多种帧格式解码和设备状态分析。
+## 何时使用
 
-## 文档地图
+当用户提出以下问题时，使用此技能：
 
-| 序号 | 我要... | 日志类型 | 阅读 |
-|------|---------|----------|------|
-| 01 | **5分钟上手** | - | [README.md](README.md) |
-| 02 | 了解系统架构 | - | [references/01-overview.md](references/01-overview.md) |
-| 03 | 查看帧格式 | - | [references/02-frame-formats.md](references/02-frame-formats.md) |
-| 04 | 理解协议机制 | - | [references/03-protocol-mechanisms.md](references/03-protocol-mechanisms.md) |
-| 05 | 了解通信流程 | - | [references/04-communication-process.md](references/04-communication-process.md) |
-| 06 | **掌握分析工作流** | 联锁日志 | [references/05-workflow.md](references/05-workflow.md) |
-| 07 | **查询设备解码规则** | - | [references/06-device-analysis.md](references/06-device-analysis.md) |
-| 08 | **联锁日志故障排查** | 联锁日志 | [references/07-interlocking-troubleshooting.md](references/07-interlocking-troubleshooting.md) |
-| 09 | **CTC日志深度分析** | CTC日志 | [references/08-ctc-analysis.md](references/08-ctc-analysis.md) |
-| 10 | 查看协议规范 | - | [references/09-protocol-schema.md](references/09-protocol-schema.md) |
-| 11 | 使用Python API | - | [references/10-api-usage.md](references/10-api-usage.md) |
+| 场景 | 示例问题 |
+|------|----------|
+| 解析通信帧 | "帮我解析这个SDCI帧" |
+| 分析设备状态 | "信号机D1的状态是什么" |
+| 故障排查 | "为什么会出现ACK超时" |
+| 时间线分析 | "设备D5最近有什么状态变化" |
+| 协议问答 | "DC2和DC3帧的作用是什么" |
+| 提取帧数据 | "从日志中提取所有FIR帧" |
 
-### 日志类型区分
+## 快速开始
 
-**联锁日志（ZLEvents*）**
-- 文件格式：`ZLEventsMMDDYY`（如 ZLEvents260201）
-- 记录内容：联锁系统发送和接收的帧数据
-- 典型标记：`>>[帧类型]`（发送）、`<<[帧类型]`（接收）、`Er未收到ACK`（错误）
+### 1. 分析日志文件
 
-**CTC日志（lgxtcidriver_*.log）**
-- 文件格式：`lgxtcidriver_YYYYMMDD_序号.log`
-- 记录内容：CTC驱动程序的连接状态、故障检测、主备切换
-- 典型标记：`驱动启动`、`检测到硬件故障`、`收到DC3，连接已建立`
+用户提供日志文件路径后：
 
-### 详细场景指南
+```
+日志文件: ZLEvents260201
+码位表: lgxtq.zl
+```
 
-**何时参考 07-interlocking-troubleshooting.md（联锁日志故障排查）？**
+执行分析：
+```python
+from parser import CTCLogAnalyzer, CodePositionTable
 
-**适用日志**：`ZLEvents*` 联锁日志
+cpt = CodePositionTable("lgxtq.zl")
+analyzer = CTCLogAnalyzer("ZLEvents260201", cpt)
+frames = analyzer.analyze()  # 解析所有帧
+analyzer.generate_report("report.txt")
+```
 
-当分析联锁日志遇到以下问题时查阅：
-- 出现 `"Er未收到ACK"` 错误
-- SDIQ 显示长等待时间（如"距离下次SDIQ发送还需等待63632902ms"）
-- DC2/DC3 握手频繁重试或失败
-- 从联锁帧提取设备状态时出现异常
-- 解析设备状态时状态值冲突或超出范围
-- grep 命令找不到设备帧数据（索引转换问题）
-- 处理大联锁日志文件时内存不足或性能问题
+### 2. 解析单个帧
 
-**文档内容包括**：联锁日志常见问题诊断流程、设备状态解析问题排查、性能优化方案、3个联锁日志专用诊断脚本
+用户提供十六进制帧数据：
+```
+7D 04 11 00 00 8A 03 00 25 10 7E
+```
 
----
+执行解析：
+```python
+from parser import FrameParser, CodePositionTable
 
-**何时参考 08-ctc-analysis.md（CTC日志深度分析）？**
+parser = FrameParser(CodePositionTable("lgxtq.zl"))
+frame = parser.parse_frame(bytes.fromhex("7D 04 11 00 00 8A 03 00 25 10 7E"))
+# frame.frame_type_name → "SDCI"
+# frame.device_states → 设备状态列表
+```
 
-**适用日志**：`lgxtcidriver_*.log` CTC驱动日志
+### 3. 设备时间线分析
 
-当分析CTC日志进行以下深度调查时查阅：
-- 统计和分析 ACK 超时错误的根本原因（CTC视角）
-- 识别硬件故障和通信中断事件
-- 区分正常重启与异常重连（故障切换分析）
-- 分析CTC与联锁主机/备机的连接历史
-- 检测CTC驱动程序检测到的通信时序异常
-- 追踪CTC视角下的主备状态切换时间线
-- 排查CTC检测到的间歇性通信问题
-- 分析CTC故障切换决策过程
+```
+分析设备D1的状态变化
+```
 
-**文档内容包括**：CTC日志ACK错误分析方法、CTC硬件故障检测流程、正常/异常重连对比分析、CTC帧分布统计、CTC通信序列分析、CTC日志分析检查清单
+```python
+from parser import DeviceTimelineAnalyzer, CodePositionTable
 
-## ⚠️ 重要提醒
+analyzer = DeviceTimelineAnalyzer("ZLEvents260201", cpt)
+timeline = analyzer.analyze_device("D1")
+analyzer.generate_timeline_report("D1", "d1_timeline.txt")
+```
 
-分析任何帧类型或故障排除时，**必须**先阅读相关参考文档：
-- 帧格式详情 → `references/02-frame-formats.md`
-- 协议机制 → `references/03-protocol-mechanisms.md`
+### 4. 故障分析
 
-## 约束说明
+```
+分析日志中的硬件故障
+```
 
-- **ACK超时**: 500ms（协议固定，不可修改）
-- **数据文件**: [Error.sys](references/Error.sys)（故障代码）、[lgxtq.zl](references/lgxtq.zl)（码位表示例）
+```python
+from parser import CTCLogHardwareFaultAnalyzer
+
+analyzer = CTCLogHardwareFaultAnalyzer("lgxtcidriver_20260101_1.log")
+result = analyzer.analyze()
+# result["fault_events"] → 故障事件列表
+# result["recovery_events"] → 恢复事件列表
+```
+
+## 支持的帧类型
+
+| 类型 | 代码 | 方向 | 说明 |
+|------|------|------|------|
+| DC2 | 0x12 | CTC→联锁 | 连接请求 |
+| DC3 | 0x13 | 联锁→CTC | 连接确认 |
+| ACK | 0x06 | 双向 | 应答/心跳 |
+| NACK | 0x15 | 双向 | 否定应答 |
+| VERROR | 0x10 | 双向 | 版本错误 |
+| SDCI | 0x8A | 联锁→CTC | 站场数据变化(增量) |
+| SDI | 0x85 | 联锁→CTC | 站场完整数据(全量) |
+| SDIQ | 0x6A | CTC→联锁 | 站场数据请求 |
+| FIR | 0x65 | 联锁→CTC | 故障信息报告 |
+| RSR | 0xAA | 双向 | 系统工作状态报告 |
+| BCC | 0x95 | CTC→联锁 | 按钮控制命令 |
+| ACQ | 0x75 | 联锁→CTC | 自律控制请求 |
+| ACA | 0x7A | CTC→联锁 | 自律控制同意 |
+| TSQ | 0x9A | 联锁→CTC | 时间同步请求 |
+| TSD | 0xA5 | CTC→联锁 | 时间同步数据 |
+
+## 日志类型
+
+### 联锁日志 (ZLEvents*)
+- 格式: `ZLEventsMMDDYY`
+- 内容: 联锁系统发送/接收的帧数据
+- 标记: `>>[帧类型]` 发送, `<<[帧类型]` 接收
+
+### CTC日志 (lgxtcidriver_*.log)
+- 格式: `lgxtcidriver_YYYYMMDD_序号.log`
+- 内容: 连接状态、故障检测、主备切换
+
+## 约束
+
+- ACK超时: 500ms
+- 故障码参考: `references/Error.sys`
+- 码位表参考: `references/lgxtq.zl`
+
+## 常用API
+
+```python
+# 解析所有帧类型
+from parser import parse_all_frames
+frames = parse_all_frames("logfile", "lgxtq.zl")
+
+# 仅解析SDCI帧
+from parser import parse_sdci_log
+frames = parse_sdci_log("logfile", "lgxtq.zl")
+
+# 分析硬件故障
+from parser import analyze_hardware_faults
+result = analyze_hardware_faults("lgxtcidriver.log")
+```
