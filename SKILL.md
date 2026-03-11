@@ -150,3 +150,53 @@ frames = parse_sdci_log("logfile", "lgxtq.zl")
 from parser import analyze_hardware_faults
 result = analyze_hardware_faults("lgxtcidriver.log")
 ```
+
+## 模板脚本 (templates/)
+
+技能提供了三个分析模板，可直接修改使用：
+
+### 1. analyze_simple.py - 简单关键字搜索
+
+快速查找日志中的关键字记录，适用于初步排查：
+
+```python
+# 修改搜索关键字
+keywords = ['未收到ACK', 'Er', 'DC2', 'DC3', '超时', '错误']
+
+# 运行脚本分析最新日志
+python templates/analyze_simple.py
+```
+
+### 2. analyze_detailed.py - 通信中断详细分析
+
+生成完整的通信中断分析报告，包含：
+- ACK超时/未收到ACK错误统计
+- DC2连接请求与DC3确认统计
+- 中断时间点与重连恢复分析
+
+```bash
+# 直接运行，自动分析最新ZLEvents文件
+python templates/analyze_detailed.py
+```
+
+### 3. analyze_timeline.py - 设备状态时间线分析
+
+分析指定设备的状态变化历史：
+
+```bash
+# 分析道岔区段 (设备索引37)
+grep -E "8A.*00 25" ZLEvents260201 > device64_frames.txt
+python templates/analyze_timeline.py switch device64_frames.txt 37 "道岔区段64"
+
+# 分析信号机 (设备索引66)
+grep -E "8A.*00 42" ZLEvents260201 > d12_frames.txt
+python templates/analyze_timeline.py signal d12_frames.txt 66 "D12"
+
+# 分析无岔区段
+python templates/analyze_timeline.py track ZLEvents260201
+```
+
+支持设备类型：
+- `switch`: 道岔区段（位置、锁闭、占用状态）
+- `signal`: 信号机（颜色、进路转岔、延时解锁）
+- `track`: 无岔区段（空闲/占用、锁闭状态）
