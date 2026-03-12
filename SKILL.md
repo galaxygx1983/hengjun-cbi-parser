@@ -1,7 +1,7 @@
 ---
 name: hengjun-cbi-parser
 version: 2.1.0
-description: 铁路CBI/CTC通信日志分析工具。当用户需要分析铁路联锁系统日志、解析通信帧协议、排查故障时使用此技能。
+description: 铁路计算机联锁(CBI)与调度集中(CTC)通信日志分析工具。当用户需要分析亨均联锁系统日志文件(ZLEvents、lgxtcidriver)、解析CBI/CTC通信帧协议(SDCI、SDI、FIR、DC2、DC3、ACK、NACK等)、排查铁路信号故障、查询设备状态(信号机、道岔、无岔区段)、分析通信中断原因、解析故障码、生成设备时间线报告、分析硬件故障日志等相关问题时使用。支持SDCI增量数据帧、SDI全量数据帧、FIR故障报告帧、BCC按钮控制命令帧等铁路专用通信协议的完整解析。
 trigger:
   - 分析铁路日志
   - CBI CTC 日志
