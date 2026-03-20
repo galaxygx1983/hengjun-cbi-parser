@@ -12,6 +12,8 @@ trigger:
   - 故障码查询
   - ZLEvents
   - lgxtcidriver
+github_url: https://github.com/galaxygx1983/hengjun-cbi-parser
+github_hash: 0939b1c0
 ---
 
 # Hengjun CBI Parser
