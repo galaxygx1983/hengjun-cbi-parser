@@ -14,6 +14,8 @@ trigger:
   - lgxtcidriver
 github_url: https://github.com/galaxygx1983/hengjun-cbi-parser
 github_hash: 0939b1c0
+allowed-tools: 
+disable: true
 ---
 
 # Hengjun CBI Parser
@@ -202,3 +204,22 @@ python templates/analyze_timeline.py track ZLEvents260201
 - `switch`: 道岔区段（位置、锁闭、占用状态）
 - `signal`: 信号机（颜色、进路转岔、延时解锁）
 - `track`: 无岔区段（空闲/占用、锁闭状态）
+
+### 4. analyze_protocol.py - CBI-CTC 通信协议规范检查
+
+检查日志文件是否符合协议规范要求，专注于序号和通信流程分析：
+
+```bash
+# 分析日志文件
+python templates/analyze_protocol.py ZLEvents260331
+
+# 生成协议检查报告
+```
+
+检查内容包括：
+- 帧格式验证（帧头 0x7D、帧尾 0x7E、版本号 0x11）
+- 序号连续性检查（CTC→联锁、联锁→CTC 两个方向）
+- 握手配对检查（DC2/DC3、SDIQ/SDI）
+- ACK 响应时间分析
+- 通信中断检测（5分钟无通信视为中断）
+- 发送超时检测（500ms 无发送视为超时）
