@@ -39,10 +39,12 @@ class CTCLogAnalyzer:
         Returns:
             解析出的SDCIFrame列表
         """
-        # 正则表达式匹配包含SDCI数据的行
-        # 匹配模式: "Data: 7D 04 11 65 BF 8A 03 00 00 B7 10 28 81 7E"
+        # 正则表达式匹配包含帧数据的行
+        # 支持两种日志格式：
+        # 1. PacketToString格式: "... Data: 7D 04 11 65 BF 8A 03 00 ..."
+        # 2. 完整报文格式: "... 内容=[7D 04 11 65 BF 8A 03 00 ...]"
         data_pattern = re.compile(
-            r"(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}\.\d+).*?Data:\s+([0-9A-Fa-f\s]+)"
+            r"(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}\.\d+).*?(?:Data:\s+|内容=\[)([0-9A-Fa-f\s]+?)(?:\]|$)"
         )
 
         frame_count = 0
@@ -126,7 +128,8 @@ class CTCLogAnalyzer:
             lines.append(f"  发送序号: 0x{frame.send_seq:02X} ({frame.send_seq})")
             lines.append(f"  确认序号: 0x{frame.ack_seq:02X} ({frame.ack_seq})")
             lines.append(f"  数据长度: {frame.data_length}字节")
-            lines.append(f"  CRC校验: 0x{frame.crc:04X}")
+            crc_status = "通过" if frame.crc_valid else "失败"
+            lines.append(f"  CRC校验: 0x{frame.crc:04X} ({crc_status})")
             lines.append(f"  变化设备数: {frame.get_device_count()}")
             lines.append(f"  原始数据: {frame.raw_data.hex().upper()}")
 

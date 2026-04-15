@@ -85,24 +85,63 @@ class FrameUtils:
             i += 1
         return bytes(result)
 
+    # CRC-CCITT (XModem) 查找表
+    # 多项式: 0x1021, 初始值: 0x0000, 无最终异或
+    # 与CTC源码 ci_crccheck.cpp 中的 CrcTable 完全一致
+    _CRC_CCITT_TABLE = [
+        0x0000, 0x1021, 0x2042, 0x3063, 0x4084, 0x50A5, 0x60C6, 0x70E7,
+        0x8108, 0x9129, 0xA14A, 0xB16B, 0xC18C, 0xD1AD, 0xE1CE, 0xF1EF,
+        0x1231, 0x0210, 0x3273, 0x2252, 0x52B5, 0x4294, 0x72F7, 0x62D6,
+        0x9339, 0x8318, 0xB37B, 0xA35A, 0xD3BD, 0xC39C, 0xF3FF, 0xE3DE,
+        0x2462, 0x3443, 0x0420, 0x1401, 0x64E6, 0x74C7, 0x44A4, 0x5485,
+        0xA56A, 0xB54B, 0x8528, 0x9509, 0xE5EE, 0xF5CF, 0xC5AC, 0xD58D,
+        0x3653, 0x2672, 0x1611, 0x0630, 0x76D7, 0x66F6, 0x5695, 0x46B4,
+        0xB75B, 0xA77A, 0x9719, 0x8738, 0xF7DF, 0xE7FE, 0xD79D, 0xC7BC,
+        0x48C4, 0x58E5, 0x6886, 0x78A7, 0x0840, 0x1861, 0x2802, 0x3823,
+        0xC9CC, 0xD9ED, 0xE98E, 0xF9AF, 0x8948, 0x9969, 0xA90A, 0xB92B,
+        0x5AF5, 0x4AD4, 0x7AB7, 0x6A96, 0x1A71, 0x0A50, 0x3A33, 0x2A12,
+        0xDBFD, 0xCBDC, 0xFBBF, 0xEB9E, 0x9B79, 0x8B58, 0xBB3B, 0xAB1A,
+        0x6CA6, 0x7C87, 0x4CE4, 0x5CC5, 0x2C22, 0x3C03, 0x0C60, 0x1C41,
+        0xEDAE, 0xFD8F, 0xCDEC, 0xDDCD, 0xAD2A, 0xBD0B, 0x8D68, 0x9D49,
+        0x7E97, 0x6EB6, 0x5ED5, 0x4EF4, 0x3E13, 0x2E32, 0x1E51, 0x0E70,
+        0xFF9F, 0xEFBE, 0xDFDD, 0xCFFC, 0xBF1B, 0xAF3A, 0x9F59, 0x8F78,
+        0x9188, 0x81A9, 0xB1CA, 0xA1EB, 0xD10C, 0xC12D, 0xF14E, 0xE16F,
+        0x1080, 0x00A1, 0x30C2, 0x20E3, 0x5004, 0x4025, 0x7046, 0x6067,
+        0x83B9, 0x9398, 0xA3FB, 0xB3DA, 0xC33D, 0xD31C, 0xE37F, 0xF35E,
+        0x02B1, 0x1290, 0x22F3, 0x32D2, 0x4235, 0x5214, 0x6277, 0x7256,
+        0xB5EA, 0xA5CB, 0x95A8, 0x8589, 0xF56E, 0xE54F, 0xD52C, 0xC50D,
+        0x34E2, 0x24C3, 0x14A0, 0x0481, 0x7466, 0x6447, 0x5424, 0x4405,
+        0xA7DB, 0xB7FA, 0x8799, 0x97B8, 0xE75F, 0xF77E, 0xC71D, 0xD73C,
+        0x26D3, 0x36F2, 0x0691, 0x16B0, 0x6657, 0x7676, 0x4615, 0x5634,
+        0xD94C, 0xC96D, 0xF90E, 0xE92F, 0x99C8, 0x89E9, 0xB98A, 0xA9AB,
+        0x5844, 0x4865, 0x7806, 0x6827, 0x18C0, 0x08E1, 0x3882, 0x28A3,
+        0xCB7D, 0xDB5C, 0xEB3F, 0xFB1E, 0x8BF9, 0x9BD8, 0xABBB, 0xBB9A,
+        0x4A75, 0x5A54, 0x6A37, 0x7A16, 0x0AF1, 0x1AD0, 0x2AB3, 0x3A92,
+        0xFD2E, 0xED0F, 0xDD6C, 0xCD4D, 0xBDAA, 0xAD8B, 0x9DE8, 0x8DC9,
+        0x7C26, 0x6C07, 0x5C64, 0x4C45, 0x3CA2, 0x2C83, 0x1CE0, 0x0CC1,
+        0xEF1F, 0xFF3E, 0xCF5D, 0xDF7C, 0xAF9B, 0xBFBA, 0x8FD9, 0x9FF8,
+        0x6E17, 0x7E36, 0x4E55, 0x5E74, 0x2E93, 0x3EB2, 0x0ED1, 0x1EF0,
+    ]
+
     @staticmethod
     def calculate_crc(data: bytes) -> int:
-        """计算CRC16校验和（Modbus CRC16）
+        """计算CRC16校验和（CRC-CCITT XModem）
+
+        与CTC源码 ci_crccheck.cpp 一致：
+        - 多项式: 0x1021
+        - 初始值: 0x0000
+        - 查表法实现
 
         Args:
-            data: 待校验的数据
+            data: 待校验的数据（从首部长度字节开始，到CRC前一位结束）
 
         Returns:
             16位CRC值
         """
-        crc = 0xFFFF
+        crc = 0x0000
+        table = FrameUtils._CRC_CCITT_TABLE
         for byte in data:
-            crc ^= byte
-            for _ in range(8):
-                if crc & 0x0001:
-                    crc = (crc >> 1) ^ 0xA001
-                else:
-                    crc >>= 1
+            crc = ((crc << 8) ^ table[(crc >> 8) ^ byte]) & 0xFFFF
         return crc
 
     @staticmethod
@@ -114,54 +153,57 @@ class FrameUtils:
     ) -> bytes:
         """构建发送帧（自动进行数据转义）
 
+        处理流程与CTC源码 core_ci_driver.cpp 一致：
+        1. 构建原始帧（未转义）
+        2. 在原始帧上计算CRC（覆盖 header[1:] + data_length(如果有) + payload）
+        3. 写入CRC（小端序：低字节在前）和帧尾
+        4. 对帧体（不含帧头帧尾）进行转义
+
+        注意：控制帧（如DC2、ACK等）没有数据载荷时，不包含数据长度字段。
+        只有数据帧（SDCI、SDI等）才包含2字节数据长度字段。
+
         Args:
-            frame_type: 帧类型（如0x8A为SDCI，0x85为SDI）
+            frame_type: 帧类型（如0x8A为SDCI，0x85为SDI，0x12为DC2）
             send_seq: 发送序号
             ack_seq: 确认序号
-            payload: 站场数据载荷
+            payload: 站场数据载荷（原始数据，未转义）。控制帧传 b''。
 
         Returns:
             完整的帧字节数据（已转义）
         """
-        # 构建帧头部分（不含转义）
-        header = bytes([
-            FrameUtils.FRAME_HEADER,  # 帧头 0x7D
-            FrameUtils.HEADER_LENGTH,   # 首部长 0x04
-            FrameUtils.VERSION,         # 版本号 0x11
-            send_seq,                       # 发送序号
-            ack_seq,                        # 确认序号
-            frame_type,                     # 帧类型
+        data_length = len(payload)
+
+        # 构建待CRC计算的数据（原始数据，不含帧头和帧尾）
+        # 格式：首部长(1) + 版本号(1) + 发送序号(1) + 确认序号(1) + 帧类型(1) + [数据长度(2)] + [载荷(原始)]
+        # 与CTC源码一致：数据长度字段只在有数据载荷时包含
+        crc_data = bytes([
+            FrameUtils.HEADER_LENGTH,   # 0x04
+            FrameUtils.VERSION,         # 0x11
+            send_seq,
+            ack_seq,
+            frame_type,
         ])
 
-        # 数据长度（小端序）
-        data_length = len(payload)
-        data_length_bytes = bytes([data_length & 0xFF, (data_length >> 8) & 0xFF])
+        if data_length > 0:
+            # 数据帧：包含数据长度字段（小端序）和载荷
+            data_length_bytes = bytes([data_length & 0xFF, (data_length >> 8) & 0xFF])
+            crc_data = crc_data + data_length_bytes + payload
 
-        # 对载荷进行转义
-        escaped_payload = FrameUtils.escape_data(payload)
-
-        # 构建待CRC计算的数据（不含帧头和帧尾）
-        # 格式：首部长(1) + 版本号(1) + 发送序号(1) + 确认序号(1) + 帧类型(1) + 数据长度(2) + 载荷(已转义)
-        crc_data = header[1:] + data_length_bytes + escaped_payload
-
-        # 计算CRC16
+        # 计算CRC16-CCITT
         crc = FrameUtils.calculate_crc(crc_data)
-        crc_bytes = bytes([(crc >> 8) & 0xFF, crc & 0xFF])
+        # CRC小端序：低字节在前，高字节在后（与CTC源码 AppendCrcAndTail 一致）
+        crc_bytes = bytes([crc & 0xFF, (crc >> 8) & 0xFF])
 
-        # 构建完整帧（不含转义）
-        # 帧头 + 首部长 + 版本号 + 序号 + 帧类型 + 数据长度 + 载荷 + CRC + 帧尾
-        unescaped_frame = (
+        # 构建完整原始帧（未转义）
+        raw_frame = (
             bytes([FrameUtils.FRAME_HEADER]) +
-            header[1:] +
-            data_length_bytes +
-            escaped_payload +
+            crc_data +
             crc_bytes +
             bytes([FrameUtils.FRAME_TAIL])
         )
 
-        # 对帧头和帧尾之间的数据进行转义
-        # 注意：帧头和帧尾不转义，只转义中间的数据部分
-        frame_body = unescaped_frame[1:-1]  # 去掉帧头和帧尾
+        # 对帧头和帧尾之间的数据进行转义（帧头和帧尾本身不转义）
+        frame_body = raw_frame[1:-1]
         escaped_body = FrameUtils.escape_data(frame_body)
 
         # 重新组装帧

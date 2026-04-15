@@ -24,6 +24,9 @@
    # 分析信号机D12 (设备索引66)
    grep -E "8A.*00 42" ZLEvents260201 > d12_frames.txt
    python analyze_timeline.py signal d12_frames.txt 66 "D12"
+
+   # 分析无岔区段
+   python analyze_timeline.py track ZLEvents260201
 """
 
 import re
@@ -32,7 +35,101 @@ import argparse
 from collections import Counter
 
 
-# ============== 状态解码函数 ==============
+# ============== 帧解析工具（与CTC源码一致） ==============
+
+FRAME_HEADER = 0x7D
+FRAME_TAIL = 0x7E
+ESCAPE_CHAR = 0x7F
+FRAME_TYPE_SDCI = 0x8A
+
+# 反转义映射表（与CTC源码 ci_unescape.cpp 一致）
+UNESCAPE_MAP = {
+    0xFD: 0x7D,
+    0xFE: 0x7E,
+    0xFF: 0x7F,
+}
+
+
+def unescape_frame_body(data):
+    """反转义帧体数据"""
+    result = bytearray()
+    i = 0
+    while i < len(data):
+        if data[i] == ESCAPE_CHAR and i + 1 < len(data):
+            second = data[i + 1]
+            if second in UNESCAPE_MAP:
+                result.append(UNESCAPE_MAP[second])
+                i += 2
+                continue
+        result.append(data[i])
+        i += 1
+    return bytes(result)
+
+
+def parse_sdci_frame(raw_data):
+    """解析SDCI帧，提取载荷数据
+
+    处理流程与CTC源码一致：
+    1. 检查帧头帧尾
+    2. 反转义帧体
+    3. 提取数据长度和载荷（从反转义后的数据）
+
+    Args:
+        raw_data: 帧的原始字节数据
+
+    Returns:
+        (payload, send_seq, ack_seq) 或 None
+    """
+    if len(raw_data) < 9:
+        return None
+    if raw_data[0] != FRAME_HEADER or raw_data[-1] != FRAME_TAIL:
+        return None
+    if raw_data[5] != FRAME_TYPE_SDCI:
+        return None
+
+    # 反转义帧体
+    frame_body = raw_data[1:-1]
+    unescaped = unescape_frame_body(frame_body)
+
+    if len(unescaped) < 9:
+        return None
+
+    send_seq = unescaped[2]
+    ack_seq = unescaped[3]
+    frame_type = unescaped[4]
+
+    if frame_type != FRAME_TYPE_SDCI:
+        return None
+
+    # 数据长度（小端序）
+    data_length = unescaped[5] | (unescaped[6] << 8)
+
+    # 提取载荷
+    payload_start = 7
+    payload_end = len(unescaped) - 2  # 减去CRC的2字节
+    payload = bytes(unescaped[payload_start:payload_end])
+
+    return (payload, send_seq, ack_seq)
+
+
+def parse_sdci_payload(payload):
+    """解析SDCI载荷（亨均版3字节格式，与CTC源码 ApplySDCIToSDIHJ 一致）
+
+    每个条目3字节：
+    - 前2字节：设备索引（大端序）
+    - 第3字节：设备状态
+    """
+    entries = []
+    for i in range(0, len(payload), 3):
+        if i + 2 >= len(payload):
+            break
+        device_index = (payload[i] << 8) | payload[i + 1]
+        state = payload[i + 2]
+        entries.append((device_index, state))
+    return entries
+
+
+# ============== 状态解码函数（与 state_decoder.py 保持一致） ==============
 
 
 def decode_switch_state(state_byte):
@@ -148,24 +245,47 @@ def decode_track_state(state_byte, bit_offset=0):
 def analyze_by_index(frame_file, device_index, device_type):
     """
     通过设备索引分析（适用于道岔区段和信号机）
+
+    使用正确的帧解析流程：反转义 → 提取载荷 → 解析设备条目
     """
     records = []
-    device_hex = f"{device_index:02X}"
 
     with open(frame_file, "r", encoding="utf-8", errors="ignore") as f:
         lines = f.readlines()
 
     for line in lines:
+        # 提取时间戳
+        time_match = re.match(r"(\d{2}:\d{2}:\d{2}\.\d+)", line)
+        time_str = time_match.group(1) if time_match else ""
+
+        # 提取十六进制帧数据
         parts = line.split()
-        if len(parts) >= 12:
-            time_str = parts[0]
-            hex_data = " ".join(parts[3:])
+        hex_parts = []
+        in_data = False
+        for part in parts:
+            if re.match(r"^[0-9A-Fa-f]{2}$", part):
+                hex_parts.append(part)
+                in_data = True
+            elif in_data:
+                break
 
-            pattern = rf"00 {device_hex} ([0-9A-Fa-f]{{2}})"
-            match = re.search(pattern, hex_data)
+        if len(hex_parts) < 9:
+            continue
 
-            if match:
-                state = int(match.group(1), 16)
+        try:
+            raw_data = bytes.fromhex("".join(hex_parts))
+        except ValueError:
+            continue
+
+        result = parse_sdci_frame(raw_data)
+        if result is None:
+            continue
+
+        payload, send_seq, ack_seq = result
+        entries = parse_sdci_payload(payload)
+
+        for dev_idx, state in entries:
+            if dev_idx == device_index:
                 if device_type == "switch":
                     decoded = decode_switch_state(state)
                 elif device_type == "signal":
@@ -180,6 +300,8 @@ def analyze_by_index(frame_file, device_index, device_type):
 def analyze_track_sections(log_file):
     """
     分析无岔区段（通过字节索引和位偏移）
+
+    使用正确的帧解析流程：反转义 → 提取载荷 → 解析设备条目
     """
     # 设备配置示例（可从码位表读取）
     devices = {
@@ -188,69 +310,51 @@ def analyze_track_sections(log_file):
     }
 
     device_data = {name: [] for name in devices}
-    sdci_marker = b"[SDCI ]"
 
-    with open(log_file, "rb") as f:
-        content = f.read()
+    # 匹配包含SDCI帧数据的日志行
+    # 支持两种日志格式：
+    # 1. PacketToString格式: "... Data: 7D 04 11 65 BF 8A 03 00 ..."
+    # 2. 完整报文格式: "... 内容=[7D 04 11 65 BF 8A 03 00 ...]"
+    line_pattern = re.compile(
+        r"(\d{2}:\d{2}:\d{2})\s+.*?(?:Data:\s+|内容=\[)([0-9A-Fa-f\s]+?)(?:\]|$)"
+    )
 
-    pos = 0
-    while True:
-        pos = content.find(sdci_marker, pos)
-        if pos == -1:
-            break
+    with open(log_file, "r", encoding="utf-8", errors="ignore") as f:
+        for line_num, line in enumerate(f, 1):
+            match = line_pattern.search(line)
+            if not match:
+                continue
 
-        # 提取时间戳
-        line_start = content.rfind(b"\n", 0, pos)
-        line_start = line_start if line_start != -1 else 0
-        line_end = content.find(b"\n", pos)
-        line_end = line_end if line_end != -1 else len(content)
+            timestamp = match.group(1)
+            hex_str = match.group(2).strip()
 
-        line = content[line_start:line_end]
-        ts_match = re.search(rb"(\d{2}:\d{2}:\d{2})", line)
-        if not ts_match:
-            pos += 1
-            continue
-
-        timestamp = ts_match.group(1).decode("latin1")
-
-        # 提取十六进制数据
-        after = content[pos + len(sdci_marker) :]
-        hex_chars = b""
-        for byte in after:
-            if (48 <= byte <= 57) or (65 <= byte <= 70) or (97 <= byte <= 102):
-                hex_chars += bytes([byte])
-            elif len(hex_chars) >= 28:
-                break
-
-        if len(hex_chars) >= 14:
             try:
-                hex_str = hex_chars.decode("ascii")
-                data = bytes.fromhex(hex_str[:60])
+                raw_data = bytes.fromhex(hex_str.replace(" ", ""))
+            except ValueError:
+                continue
 
-                if len(data) >= 8 and data[5] == 0x8A:
-                    remaining = data[8:-3]
+            # 检查是否是SDCI帧
+            if len(raw_data) < 9 or raw_data[5] != FRAME_TYPE_SDCI:
+                continue
 
-                    for j in range(0, len(remaining) - 2, 3):
-                        if j + 3 <= len(remaining):
-                            idx_device = (remaining[j] << 8) | remaining[j + 1]
-                            state = remaining[j + 2]
+            result = parse_sdci_frame(raw_data)
+            if result is None:
+                continue
 
-                            for name, config in devices.items():
-                                if idx_device == config["objects_index"]:
-                                    decoded = decode_track_state(
-                                        state, config["bit_offset"]
-                                    )
-                                    device_data[name].append(
-                                        {
-                                            "timestamp": timestamp,
-                                            "state": state,
-                                            "decoded": decoded,
-                                        }
-                                    )
-            except:
-                pass
+            payload, send_seq, ack_seq = result
+            entries = parse_sdci_payload(payload)
 
-        pos += 1
+            for dev_idx, state in entries:
+                for name, config in devices.items():
+                    if dev_idx == config["objects_index"]:
+                        decoded = decode_track_state(state, config["bit_offset"])
+                        device_data[name].append(
+                            {
+                                "timestamp": timestamp,
+                                "state": state,
+                                "decoded": decoded,
+                            }
+                        )
 
     return device_data
 
@@ -414,7 +518,7 @@ def print_track_report(device_data):
             print(f"{'时间':<12} | {'状态':<16} | {'原始字节'}")
             print("-" * 50)
 
-            for entry in data[:20]:  # 只显示前20条
+            for entry in data[:20]:
                 print(
                     f"{entry['timestamp']:<12} | {entry['decoded']['状态']:<16} | 0x{entry['state']:02X}"
                 )
@@ -462,11 +566,11 @@ def main():
   # 分析道岔区段64 (设备索引37)
   grep -E "8A.*00 25" ZLEvents260201 > device64_frames.txt
   python analyze_timeline.py switch device64_frames.txt 37 "道岔区段64"
-  
+
   # 分析信号机D12 (设备索引66)
   grep -E "8A.*00 42" ZLEvents260201 > d12_frames.txt
   python analyze_timeline.py signal d12_frames.txt 66 "D12"
-  
+
   # 分析无岔区段（直接分析日志文件）
   python analyze_timeline.py track ZLEvents260201
         """,

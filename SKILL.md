@@ -128,10 +128,16 @@ result = analyzer.analyze()
 - 格式: `ZLEventsMMDDYY`
 - 内容: 联锁系统发送/接收的帧数据
 - 标记: `>>[帧类型]` 发送, `<<[帧类型]` 接收
+- 示例: `09:21:51.243 <<[DC2 ]7D 04 11 00 00 12 66 D6 7E`
 
 ### CTC日志 (lgxtcidriver_*.log)
 - 格式: `lgxtcidriver_YYYYMMDD_序号.log`
-- 内容: 连接状态、故障检测、主备切换
+- 内容: 连接状态、故障检测、主备切换、帧数据
+- 帧数据格式（CVLog输出）：
+  - INFO级别: `完整报文: 长度=N 字节, 内容=[XX XX ...]`
+  - INFO级别: `DC2帧内容: [XX XX ...]`
+  - DEBUG级别: `Timestamp: YYYY-MM-DD HH:MM:SS.MMMMMM, Size: N, Data: XX XX ...`
+- 注意：`Data:` 格式仅在DEBUG级别输出，生产环境通常只有INFO级别日志
 
 ## 约束
 
@@ -217,9 +223,10 @@ python templates/analyze_protocol.py ZLEvents260331
 ```
 
 检查内容包括：
-- 帧格式验证（帧头 0x7D、帧尾 0x7E、版本号 0x11）
-- 序号连续性检查（CTC→联锁、联锁→CTC 两个方向）
+- 帧格式验证（帧头 0x7D、帧尾 0x7E、版本号 0x11、CRC-CCITT校验、反转义处理）
+- 序号连续性检查（仅数据帧验证，控制帧跳过，与CTC源码 ci_sequencemanager 一致）
 - 握手配对检查（DC2/DC3、SDIQ/SDI）
 - ACK 响应时间分析
 - 通信中断检测（5分钟无通信视为中断）
+- 发送超时检测（500ms 无发送视为超时）
 - 发送超时检测（500ms 无发送视为超时）

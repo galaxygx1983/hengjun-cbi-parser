@@ -510,7 +510,7 @@ lgxtq.zl条目：
 
 | 错误做法                   | 正确做法                               |
 | -------------------------- | -------------------------------------- |
-| 将object_index用作字节位置 | object_index用于SDI；byte_index用于SDI |
+| 将object_index用作字节位置 | object_index用于SDCI；byte_index用于SDI |
 | 始终使用低四位             | 检查zlobjects表的bit_offset            |
 | 完全忽略bit_offset         | bit_offset决定使用哪个四位             |
 | 混淆[objects]和[zlobjects] | [objects] → SDCI；[zlobjects] → SDI  |

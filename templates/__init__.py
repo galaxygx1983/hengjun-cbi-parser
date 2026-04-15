@@ -21,7 +21,7 @@ hengjun-cbi-parser - 铁路CBI/CTC通信日志分析工具
 - hardware_fault_analyzer: 硬件故障分析器
 
 Author: Claude Code
-Version: 2.1.0
+Version: 2.2.0
 """
 
 from .device_types import (
@@ -43,7 +43,7 @@ from .frame_utils import (
     build_frame,
 )
 
-from .sdci_parser import SDCIFrameParser
+from .sdci_parser import SDCIFrameParser, FIRFrame, RSRFrame
 
 from .analyzer import (
     CTCLogAnalyzer,
@@ -58,7 +58,7 @@ from .hardware_fault_analyzer import (
     analyze_hardware_faults,
 )
 
-__version__ = "2.1.0"
+__version__ = "2.2.0"
 __all__ = [
     # 设备类型
     "DeviceType",
@@ -77,6 +77,9 @@ __all__ = [
     "build_frame",
     # SDCI解析器
     "SDCIFrameParser",
+    # FIR/RSR帧
+    "FIRFrame",
+    "RSRFrame",
     # 日志分析器
     "CTCLogAnalyzer",
     "parse_sdci_log",

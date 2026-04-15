@@ -69,9 +69,11 @@ class SDCIFrame:
     ack_seq: int  # 确认序号
     data_length: int  # 数据长度
     raw_data: bytes  # 原始数据（包含帧头到帧尾）
-    payload: bytes  # 站场表示数据
+    payload: bytes  # 站场表示数据（已反转义）
     crc: int  # CRC校验值
     device_states: list = None
+    crc_valid: bool = True  # CRC校验是否通过
+    frame_type: int = 0x8A  # 帧类型（默认SDCI）
 
     def __post_init__(self):
         if self.device_states is None:

@@ -21,12 +21,9 @@ import os
 # 添加父目录到路径以支持直接运行
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from hengjun_cbi_parser.parser import (
-    CodePositionTable,
-    CTCLogAnalyzer,
-    SDCIFrameParser,
-    export_to_json,
-)
+from hengjun_cbi_parser.code_position_table import CodePositionTable
+from hengjun_cbi_parser.analyzer import CTCLogAnalyzer, export_to_json
+from hengjun_cbi_parser.sdci_parser import SDCIFrameParser
 
 
 def parse_sdci_command(args):

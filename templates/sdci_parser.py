@@ -10,18 +10,78 @@ SDCI帧解析器模块
 - 发送序号：1字节
 - 确认序号：1字节
 - 帧类型：1字节 (0x8A为SDCI帧)
-- 数据长度：2字节 (大端序)
-- 站场表示数据：N字节 (每设备3字节：2字节序号+1字节状态)
-- CRC校验：2字节
+- 数据长度：2字节 (小端序)
+- 站场表示数据：N字节 (每设备3字节：2字节设备索引(大端序)+1字节状态)
+- CRC校验：2字节 (小端序，CRC-CCITT XModem)
 - 帧尾：1字节 (0x7E)
 """
 
+from dataclasses import dataclass
 from typing import List, Optional
 
 from .device_types import DeviceInfo, DeviceState, SDCIFrame, DeviceType
 from .code_position_table import CodePositionTable
 from .state_decoder import StateDecoder
 from .frame_utils import FrameUtils
+
+
+@dataclass
+class FIRFrame:
+    """FIR帧结构（故障信息报告）
+
+    与CTC源码 HandleFIRFrame 一致：
+    - object_index: 2字节小端序对象索引
+    - error_code: 2字节小端序错误代码
+    - error_text: 可变长度错误描述文本
+    """
+    timestamp: str
+    send_seq: int
+    ack_seq: int
+    object_index: int  # 小端序
+    error_code: int    # 小端序
+    error_text: str    # 错误描述文本
+    raw_data: bytes
+    crc: int
+    crc_valid: bool = True
+
+    def __str__(self) -> str:
+        return (f"FIR: object_index={self.object_index}, "
+                f"error_code=0x{self.error_code:04X}, "
+                f"text='{self.error_text}'")
+
+
+@dataclass
+class RSRFrame:
+    """RSR帧结构（系统工作状态报告）
+
+    与CTC源码 HandleRSRFrame 一致：
+    - system_status: 系统主备状态（0x55=主机, 0xAA=备机）
+    - dispatch_authority: 调度权限状态
+    """
+    timestamp: str
+    send_seq: int
+    ack_seq: int
+    system_status: int     # 0x55=主机, 0xAA=备机
+    dispatch_authority: int
+    raw_data: bytes
+    crc: int
+    crc_valid: bool = True
+
+    def get_system_status_desc(self) -> str:
+        return "主机" if self.system_status == 0x55 else "备机" if self.system_status == 0xAA else f"未知(0x{self.system_status:02X})"
+
+    def __str__(self) -> str:
+        return (f"RSR: system={self.get_system_status_desc()}, "
+                f"dispatch_authority=0x{self.dispatch_authority:02X}")
+
+
+def _is_control_frame(frame_type: int) -> bool:
+    """判断是否为控制帧（帧类型值0x01-0x1F）
+
+    与CTC源码 protocol_types.h IsControlFrame 一致：
+    控制帧包括 DC2(0x12), DC3(0x13), ACK(0x06), NACK(0x15), VERROR(0x10)
+    """
+    return 0x01 <= frame_type <= 0x1F
 
 
 class SDCIFrameParser:
@@ -32,6 +92,8 @@ class SDCIFrameParser:
     FRAME_TAIL = 0x7E
     FRAME_TYPE_SDCI = 0x8A  # SDCI帧（变化设备列表）
     FRAME_TYPE_SDI = 0x85  # SDI帧（完整站场状态）
+    FRAME_TYPE_FIR = 0x65   # FIR帧（故障信息报告）
+    FRAME_TYPE_RSR = 0xAA   # RSR帧（系统工作状态报告）
     FRAME_TYPE_CONTROL = 0x06
 
     def __init__(self, code_position_table: CodePositionTable):
@@ -42,8 +104,13 @@ class SDCIFrameParser:
     ) -> Optional[SDCIFrame]:
         """解析SDCI帧
 
+        处理流程与CTC源码 core_ci_driver.cpp 一致：
+        1. 检查帧头帧尾和基本字段
+        2. 反转义整个帧体（不含帧头帧尾）
+        3. 从反转义后的数据中提取CRC、数据长度、载荷
+
         Args:
-            raw_data: 帧的原始字节数据
+            raw_data: 帧的原始字节数据（可能包含转义序列）
             timestamp: 可选的时间戳字符串
 
         Returns:
@@ -56,42 +123,45 @@ class SDCIFrameParser:
         if raw_data[0] != self.FRAME_HEADER or raw_data[-1] != self.FRAME_TAIL:
             return None
 
-        # 检查首部长和版本号
+        # 检查首部长和版本号（这些字段不会被转义，因为值是0x04和0x11）
         if raw_data[1] != FrameUtils.HEADER_LENGTH or raw_data[2] != FrameUtils.VERSION:
             return None
 
-        # 检查帧类型
+        # 检查帧类型（帧类型字段也不会被转义，常见值0x8A/0x85等都不是0x7D/0x7E/0x7F）
         frame_type = raw_data[5]
         is_sdi = frame_type == self.FRAME_TYPE_SDI
         is_sdci = frame_type == self.FRAME_TYPE_SDCI
         if not (is_sdi or is_sdci):
             return None  # 不支持的帧类型
 
-        # 解析序号
+        # 解析序号（这些单字节字段不在转义范围内）
         send_seq = raw_data[3]
         ack_seq = raw_data[4]
 
-        # 解析数据长度（小端序）
-        data_length = raw_data[6] | (raw_data[7] << 8)
+        # ===== 关键修正：先反转义帧体，再提取CRC和数据长度 =====
+        # 与CTC源码一致：ProcessSinglePacketUnescape → CRC校验 → 解析字段
+        # 反转义帧体（去掉帧头0x7D和帧尾0x7E，只反转义中间部分）
+        frame_body = raw_data[1:-1]
+        unescaped_body = FrameUtils.unescape_data(frame_body)
 
-        # 提取CRC（最后3字节：2字节CRC + 1字节帧尾）
-        crc = (raw_data[-3] << 8) | raw_data[-2]
+        # 从反转义后的数据中提取CRC（最后2字节，小端序）
+        # CRC覆盖范围：从首部长度字节到CRC之前
+        crc = unescaped_body[-2] | (unescaped_body[-1] << 8)
 
-        # 提取数据载荷（跳过8字节首部，到CRC之前）
-        payload_start = 8
-        payload_end = len(raw_data) - 3
-        payload = raw_data[payload_start:payload_end]
+        # CRC校验：从unescaped_body开头到CRC之前
+        crc_data = unescaped_body[:-2]
+        calculated_crc = FrameUtils.calculate_crc(bytes(crc_data))
+        crc_valid = (crc == calculated_crc)
 
-        # 数据反转义（接收时需要反转义）
-        # 注意：反转义会影响数据长度，需要记录原始长度用于校验
-        original_payload_length = len(payload)
-        unescaped_payload = FrameUtils.unescape_data(payload)
+        # 从反转义后的数据中提取数据长度（小端序）
+        # 数据长度在帧体中的偏移为5（对应原始帧的offset 6-7）
+        # 帧体结构：首部长(1) + 版本(1) + 发送序号(1) + 确认序号(1) + 帧类型(1) + 数据长度(2) + 数据(N) + CRC(2)
+        data_length = unescaped_body[5] | (unescaped_body[6] << 8)
 
-        # 如果发生了反转义，更新数据长度
-        if len(unescaped_payload) != original_payload_length:
-            # 数据长度字段需要反映反转义后的长度
-            data_length = len(unescaped_payload)
-            payload = unescaped_payload
+        # 提取数据载荷（从帧体偏移7开始，到CRC之前结束）
+        payload_start = 7
+        payload_end = len(unescaped_body) - 2  # 减去CRC的2字节
+        payload = bytes(unescaped_body[payload_start:payload_end])
 
         # 根据帧类型解析数据载荷
         if is_sdi:
@@ -110,6 +180,8 @@ class SDCIFrameParser:
             payload=payload,
             crc=crc,
             device_states=device_states,
+            crc_valid=crc_valid,
+            frame_type=frame_type,
         )
 
     def _parse_sdci_payload(self, payload: bytes) -> List[DeviceState]:
@@ -207,3 +279,149 @@ class SDCIFrameParser:
             device_states.append(device_state)
 
         return device_states
+
+    def parse_fir_frame(
+        self, raw_data: bytes, timestamp: Optional[str] = None
+    ) -> Optional[FIRFrame]:
+        """解析FIR帧（故障信息报告）
+
+        与CTC源码 HandleFIRFrame 一致：
+        - 反转义帧体
+        - CRC校验
+        - 提取载荷：对象索引（2字节小端序）+ 错误代码（2字节小端序）+ 错误文本
+
+        Args:
+            raw_data: 帧的原始字节数据
+            timestamp: 可选的时间戳字符串
+
+        Returns:
+            解析成功的FIRFrame对象，失败返回None
+        """
+        if len(raw_data) < 9:
+            return None
+
+        if raw_data[0] != self.FRAME_HEADER or raw_data[-1] != self.FRAME_TAIL:
+            return None
+
+        # 检查帧类型
+        frame_type = raw_data[5]
+        if frame_type != self.FRAME_TYPE_FIR:
+            return None
+
+        # 反转义帧体
+        frame_body = raw_data[1:-1]
+        unescaped_body = FrameUtils.unescape_data(frame_body)
+
+        if len(unescaped_body) < 9:
+            return None
+
+        # CRC校验
+        crc = unescaped_body[-2] | (unescaped_body[-1] << 8)
+        crc_data = unescaped_body[:-2]
+        calculated_crc = FrameUtils.calculate_crc(bytes(crc_data))
+        crc_valid = (crc == calculated_crc)
+
+        # 提取序号
+        send_seq = unescaped_body[2]
+        ack_seq = unescaped_body[3]
+
+        # 数据长度（小端序）
+        data_length = unescaped_body[5] | (unescaped_body[6] << 8)
+
+        # 提取载荷
+        payload_start = 7
+        payload_end = len(unescaped_body) - 2
+        payload = bytes(unescaped_body[payload_start:payload_end])
+
+        # 解析FIR载荷：对象索引（小端序）+ 错误代码（小端序）+ 文本
+        if len(payload) < 4:
+            return None
+
+        # 对象索引：小端序（与CTC源码 HandleFIRFrame 一致）
+        # 注意：FIR帧的对象索引是小端序，与SDCI帧的大端序不同
+        object_index = payload[0] | (payload[1] << 8)
+        # 错误代码：小端序
+        error_code = payload[2] | (payload[3] << 8)
+        # 错误文本（剩余字节）
+        error_text = payload[4:].decode("gbk", errors="replace").rstrip("\x00")
+
+        return FIRFrame(
+            timestamp=timestamp or "",
+            send_seq=send_seq,
+            ack_seq=ack_seq,
+            object_index=object_index,
+            error_code=error_code,
+            error_text=error_text,
+            raw_data=raw_data,
+            crc=crc,
+            crc_valid=crc_valid,
+        )
+
+    def parse_rsr_frame(
+        self, raw_data: bytes, timestamp: Optional[str] = None
+    ) -> Optional[RSRFrame]:
+        """解析RSR帧（系统工作状态报告）
+
+        与CTC源码 HandleRSRFrame 一致：
+        - 反转义帧体
+        - CRC校验
+        - 提取载荷：第1字节为系统主备状态（0x55=主机, 0xAA=备机）
+          第2字节为调度权限状态
+
+        Args:
+            raw_data: 帧的原始字节数据
+            timestamp: 可选的时间戳字符串
+
+        Returns:
+            解析成功的RSRFrame对象，失败返回None
+        """
+        if len(raw_data) < 9:
+            return None
+
+        if raw_data[0] != self.FRAME_HEADER or raw_data[-1] != self.FRAME_TAIL:
+            return None
+
+        # 检查帧类型
+        frame_type = raw_data[5]
+        if frame_type != self.FRAME_TYPE_RSR:
+            return None
+
+        # 反转义帧体
+        frame_body = raw_data[1:-1]
+        unescaped_body = FrameUtils.unescape_data(frame_body)
+
+        if len(unescaped_body) < 9:
+            return None
+
+        # CRC校验
+        crc = unescaped_body[-2] | (unescaped_body[-1] << 8)
+        crc_data = unescaped_body[:-2]
+        calculated_crc = FrameUtils.calculate_crc(bytes(crc_data))
+        crc_valid = (crc == calculated_crc)
+
+        # 提取序号
+        send_seq = unescaped_body[2]
+        ack_seq = unescaped_body[3]
+
+        # 数据长度（小端序）
+        data_length = unescaped_body[5] | (unescaped_body[6] << 8)
+
+        # 提取载荷
+        payload_start = 7
+        payload_end = len(unescaped_body) - 2
+        payload = bytes(unescaped_body[payload_start:payload_end])
+
+        # 解析RSR载荷
+        system_status = payload[0] if len(payload) > 0 else 0
+        dispatch_authority = payload[1] if len(payload) > 1 else 0
+
+        return RSRFrame(
+            timestamp=timestamp or "",
+            send_seq=send_seq,
+            ack_seq=ack_seq,
+            system_status=system_status,
+            dispatch_authority=dispatch_authority,
+            raw_data=raw_data,
+            crc=crc,
+            crc_valid=crc_valid,
+        )
