@@ -194,7 +194,8 @@ class SDCIFrameParser:
         device_states = []
 
         for i in range(0, len(payload), 3):
-            if i + 2 >= len(payload):
+            # 修复：确保剩余字节数至少为 3，避免不完整条目
+            if len(payload) - i < 3:
                 break
 
             # 解析设备序号（大端序）

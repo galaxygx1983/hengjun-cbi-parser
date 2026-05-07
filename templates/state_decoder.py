@@ -125,10 +125,7 @@ class StateDecoder:
                 color_parts = ["2黄"]  # bit5+蓝=2黄
             elif color_bits == 0x23:
                 color_parts = ["引白"]  # bit5+蓝+灯丝短丝=引白
-            else:
-                # bit5与其他颜色组合
-                color_parts.insert(0, "[bit5组合]")
-
+            # 其他非标准组合忽略，只保留单 bit 颜色
         if color_parts:
             result["颜色"] = " + ".join(color_parts)
         else:
